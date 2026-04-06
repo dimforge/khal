@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/khal",
+    "crates/khal-derive",
+    "crates/khal-std",
+    "crates/khal-example",
+    "crates/khal-example-shaders",
+    "crates/cargo-cuda", "crates/khal-builder",
+]
+resolver = "2"
+
+[workspace.dependencies]
+bytemuck = { version = "1", features = ["derive", "extern_crate_std"] }
+anyhow = "1"
+async-channel = "2"
+thiserror = "2"
+
+# TODO: make the wgpu dependency optional too (all backends should be optional but with
+#       wgpu enabled by default).
+wgpu = { version = "29", features = ["naga-ir", "spirv"] }
+cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-version-from-build-system"] }
+
+[workspace.lints]
+rust.unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("dim2", "dim3"))',
+    'cfg(target_arch, values("spirv"))',
+] }
+
+#[profile.release]
+#opt-level = 'z'
+
+[patch.crates-io]
+#shader-slang = { path = "../slang-rs" }

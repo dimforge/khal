@@ -1,0 +1,37 @@
+[package]
+name = "khal"
+authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
+description = "Abstractions for running compute shaders with Rust."
+repository = "https://github.com/dimforge/khal"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["webgpu"]
+derive = ["khal-derive"]
+webgpu = ["khal-derive?/webgpu"]
+cpu = ["khal-derive?/cpu"]
+cuda = ["dep:cudarc", "khal-derive?/cuda"]
+push_constants = []
+subgroup_ops = []
+
+[dependencies]
+wgpu = { workspace = true, features = ["wgsl"] }
+bytemuck = { workspace = true }
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+thiserror = { workspace = true }
+smallvec = "1"
+include_dir = "0.7"
+
+khal-derive = { version = "0.1", path = "../khal-derive", optional = true }
+cudarc = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
+# cudarc is only available on host targets, not on nvptx64 device code.
+regex = "1"
+bitflags = "2"
+
+# For test_shader_compilation
+paste = "1"

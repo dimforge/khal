@@ -1,0 +1,18 @@
+[package]
+name = "khal-example-shaders"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+cpu = ["khal-std/cpu"]
+cpu-parallel = ["khal-std/cpu-parallel"]
+cuda = ["khal-std/cuda"]
+
+[dependencies]
+khal-std = { path = "../khal-std" }
+
+[lints]
+workspace = true
+
+[target.'cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))'.dependencies]
+khal = { path = "../khal", features = ["derive"] }

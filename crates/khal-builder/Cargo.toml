@@ -1,0 +1,15 @@
+[package]
+name = "khal-builder"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+cuda = []
+unsafe_remove_boundchecks = []
+
+[dependencies]
+walkdir = "2.5.0"
+anyhow = "1.0.102"
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+[package]
+name = "khal-std"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+cpu = ["corosensei"]
+cpu-parallel = ["cpu", "rayon"]
+cuda = []
+
+# If this feature is enabled, some bound-checking will be disabled,
+# possibly leading to UB if indexing out-of-bounds.
+# There are two main situations where enabling this feature is desirable:
+# - To get a sense of the overhead of bounds-checking on the GPU shader.
+# - To disable bound-checking that breaks uniform execution frows when workgroup
+#   barriers are involved. This is important when targetting the browser since it
+#   enforces a uniform control flow check on shaders involving barriers. Without
+#   enabling this feature, some shaders will fail to compile on the web.
+# The recommendation is to debug with this feature **disabled**. And enable it only
+# for deploying to the web.
+unsafe_remove_boundchecks = []
+
+[dependencies]
+glamx = { version = "0.2", default-features = false, features = ["nostd-libm", "bytemuck"] }
+rayon = { version = "1", optional = true }
+corosensei = { version = "0.3", optional = true }
+spirv-std-macros = { git = "https://github.com/Rust-GPU/rust-gpu.git", rev = "6a67e7b5" }
+khal-derive = { path = "../khal-derive" }
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu.git", rev = "6a67e7b5" }
+
+[target.'cfg(target_arch = "nvptx64")'.dependencies]
+# Fixes the UVec3::element_product bug
+cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up" }

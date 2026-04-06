@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: --deny warnings
+  RUSTDOCFLAGS: --deny warnings
+
+jobs:
+  # Check formatting.
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+  # Run clippy lints.
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install dependencies
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends build-essential curl wget file libssl-dev
+
+      - name: Populate target directory from cache
+        uses: Leafwing-Studios/cargo-cache@v2
+        with:
+          sweep-cache: true
+
+      - name: Install cargo-gpu
+        run: |
+          cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+          cargo gpu install --auto-install-rust-toolchain
+
+      - name: Run clippy lints
+        run: cargo clippy --locked --workspace --all-targets -- --deny warnings
+
+  # Check documentation.
+  doc:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends build-essential curl wget file libssl-dev
+
+      - name: Populate target directory from cache
+        uses: Leafwing-Studios/cargo-cache@v2
+        with:
+          sweep-cache: true
+
+      - name: Install cargo-gpu
+        run: |
+          cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+          cargo gpu install --auto-install-rust-toolchain
+
+      - name: Check documentation
+        run: cargo doc --locked --workspace --document-private-items --no-deps
+    # Testing.
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: sudo apt-get update; sudo apt-get install --no-install-recommends build-essential curl wget file libssl-dev
+
+      - name: Populate target directory from cache
+        uses: Leafwing-Studios/cargo-cache@v2
+        with:
+          sweep-cache: true
+      - name: Install cargo-gpu
+        run: |
+          cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+          cargo gpu install --auto-install-rust-toolchain
+      - name: Run Cargo Tests
+        run: |
+          cargo test --verbose

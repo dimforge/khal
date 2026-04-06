@@ -1,0 +1,7 @@
+[
+  {
+    "source_path": "../khal-example/shaders-spirv/add_assign.spv",
+    "entry_point": "add_assign",
+    "wgsl_entry_point": "add_assign"
+  }
+]
