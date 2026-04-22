@@ -9,10 +9,14 @@
 //! we simulate GPU threads as lightweight stackful coroutines (via `corosensei`)
 //! that yield at each barrier. A single OS thread runs all coroutines
 //! cooperatively, with zero OS scheduling overhead.
+//!
+//! Coroutine stacks are pooled per-thread to avoid repeated mmap/munmap
+//! syscalls across dispatches.
 
 extern crate std;
 
 use std::cell::Cell;
+use std::cell::RefCell;
 
 // =============================================================================
 // Barrier: yields the current coroutine back to the scheduler
@@ -63,13 +67,47 @@ pub fn dispatch_workgroups(num_workgroups: usize, f: impl Fn(u32) + Sync + Send)
 }
 
 // =============================================================================
-// Intra-workgroup dispatch (using corosensei coroutines)
+// Intra-workgroup dispatch (using corosensei coroutines with stack pooling)
 // =============================================================================
+
+/// Stack size for coroutines. Shader functions use very little stack space
+/// (local variables and small arrays), so 64KB is more than sufficient.
+const COROUTINE_STACK_SIZE: usize = 64 * 1024;
 
 thread_local! {
     /// Pointer to the active Yielder (null when not in coroutine mode).
     /// Each coroutine sets this before calling the work function.
     static COROUTINE_YIELDER: Cell<*mut corosensei::Yielder<(), ()>> = const { Cell::new(std::ptr::null_mut()) };
+
+    /// Pool of reusable coroutine stacks. Stacks are allocated on first use
+    /// and returned to the pool after each dispatch, avoiding repeated
+    /// mmap/munmap syscalls.
+    static STACK_POOL: RefCell<Vec<corosensei::stack::DefaultStack>> = RefCell::new(Vec::new());
+}
+
+/// Takes `count` stacks from the thread-local pool, allocating new ones if needed.
+fn take_stacks(count: usize) -> Vec<corosensei::stack::DefaultStack> {
+    STACK_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        let reusable = count.min(pool.len());
+        let drain_start = pool.len() - reusable;
+        let mut stacks: Vec<corosensei::stack::DefaultStack> =
+            pool.drain(drain_start..).collect();
+        for _ in stacks.len()..count {
+            stacks.push(
+                corosensei::stack::DefaultStack::new(COROUTINE_STACK_SIZE)
+                    .expect("failed to allocate coroutine stack"),
+            );
+        }
+        stacks
+    })
+}
+
+/// Returns stacks to the thread-local pool for reuse.
+fn return_stacks(stacks: impl IntoIterator<Item = corosensei::stack::DefaultStack>) {
+    STACK_POOL.with(|pool| {
+        pool.borrow_mut().extend(stacks);
+    });
 }
 
 /// Dispatches `num_threads` virtual threads using cooperative coroutines.
@@ -79,6 +117,7 @@ thread_local! {
 /// reached the barrier), the scheduler resumes them for the next phase.
 ///
 /// This runs on a single OS thread with zero OS scheduling overhead.
+/// Coroutine stacks are pooled to avoid repeated allocation.
 pub fn dispatch_workgroup_threads(num_threads: usize, f: impl Fn(u32) + Sync) {
     use corosensei::{Coroutine, CoroutineResult};
 
@@ -88,41 +127,50 @@ pub fn dispatch_workgroup_threads(num_threads: usize, f: impl Fn(u32) + Sync) {
     let f_ref: &'static (dyn Fn(u32) + Sync) =
         unsafe { core::mem::transmute(&f as &(dyn Fn(u32) + Sync)) };
 
-    // Create one coroutine per virtual thread.
-    let mut coroutines: Vec<Option<Coroutine<(), (), ()>>> = (0..num_threads)
-        .map(|tid| {
-            Some(Coroutine::new(move |yielder, ()| {
-                // Store the yielder pointer in TLS so barrier_wait() can find it.
-                COROUTINE_YIELDER.with(|cell| {
-                    cell.set(yielder as *const _ as *mut _);
-                });
-                f_ref(tid as u32);
-                // Clear the yielder pointer.
-                COROUTINE_YIELDER.with(|cell| cell.set(std::ptr::null_mut()));
-            }))
-        })
-        .collect();
+    // Take stacks from the pool (reuses existing ones, allocates only if needed).
+    let stacks = take_stacks(num_threads);
+
+    // Create one coroutine per virtual thread, using pooled stacks.
+    let mut coroutines: Vec<Option<Coroutine<(), (), (), corosensei::stack::DefaultStack>>> =
+        stacks
+            .into_iter()
+            .enumerate()
+            .map(|(tid, stack)| {
+                Some(Coroutine::with_stack(stack, move |yielder, ()| {
+                    // Store the yielder pointer in TLS so barrier_wait() can find it.
+                    COROUTINE_YIELDER.with(|cell| {
+                        cell.set(yielder as *const _ as *mut _);
+                    });
+                    f_ref(tid as u32);
+                    // Clear the yielder pointer.
+                    COROUTINE_YIELDER.with(|cell| cell.set(std::ptr::null_mut()));
+                }))
+            })
+            .collect();
 
     // Run all coroutines in round-robin until all complete.
     // Each "round" corresponds to one barrier synchronization point.
+    // Completed coroutines have their stacks recovered for pooling.
+    let mut recovered_stacks = Vec::with_capacity(num_threads);
     loop {
         let mut all_done = true;
-        for slot in coroutines.iter_mut() {
-            if let Some(coroutine) = slot {
-                match coroutine.resume(()) {
-                    CoroutineResult::Yield(()) => {
-                        // Coroutine yielded at a barrier — continue to next one.
-                        all_done = false;
-                    }
-                    CoroutineResult::Return(()) => {
-                        // Coroutine completed — remove it.
-                        *slot = None;
-                    }
+        for i in 0..coroutines.len() {
+            let result = coroutines[i].as_mut().map(|c| c.resume(()));
+            match result {
+                Some(CoroutineResult::Yield(())) => {
+                    all_done = false;
                 }
+                Some(CoroutineResult::Return(())) => {
+                    recovered_stacks.push(coroutines[i].take().unwrap().into_stack());
+                }
+                None => {}
             }
         }
         if all_done {
             break;
         }
     }
+
+    // Return stacks to the pool for reuse by future dispatches.
+    return_stacks(recovered_stacks);
 }
