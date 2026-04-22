@@ -24,14 +24,14 @@ unsafe_remove_boundchecks = []
 glamx = { version = "0.2", default-features = false, features = ["nostd-libm", "bytemuck"] }
 rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
-spirv-std-macros = { git = "https://github.com/Rust-GPU/rust-gpu.git", rev = "6a67e7b5" }
+spirv-std-macros = "0.10.0-alpha.1"
 khal-derive = { path = "../khal-derive" }
 
 [lints]
 workspace = true
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu.git", rev = "6a67e7b5" }
+spirv-std = "0.10.0-alpha.1"
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
 # Fixes the UVec3::element_product bug

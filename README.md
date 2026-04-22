@@ -34,7 +34,7 @@ The crates.io version of `cargo-gpu` is outdated. Install from Git and let it se
 toolchain:
 
 ```bash
-cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+cargo install cargo-gpu --version 0.10.0-alpha.1
 cargo gpu install
 ```
 
