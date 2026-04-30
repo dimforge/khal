@@ -28,3 +28,13 @@ pub use glamx;
 
 #[cfg(target_arch = "nvptx64")]
 pub use cuda_std;
+
+
+#[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+pub use std::println;
+#[cfg(any(target_arch = "spirv", target_arch = "nvptx64"))]
+#[macro_export]
+macro_rules! println {
+    () => { };
+    ($($arg:tt)*) => { };
+}
