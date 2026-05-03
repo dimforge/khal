@@ -13,7 +13,9 @@
 on any platform: **WebGPU**, **CUDA**, or **CPU** -- from a single codebase.
 
 > **Warning**
-> KHAL is still under heavy development.
+> KHAL is still under heavy development. The CUDA backend is currently only supported when using the
+> github version of `khal-std` (because some dependencies are not available on cartes.io yet). If you
+> don’t intend to target cuda, then the published version of `khal-std` is the way to go.
 
 <p align="center">
   <img src="./assets/khal-diagram.png" height="400px">
@@ -25,13 +27,11 @@ on any platform: **WebGPU**, **CUDA**, or **CPU** -- from a single codebase.
 - **Proc-macro bindings** -- `#[spirv_bindgen]` generates type-safe host-side structs from your shader function signature.
 - **Build pipeline** -- `khal-builder` orchestrates `cargo gpu` and `cargo cuda` to compile shaders at build time.
 
-
 ## Development setup
 
 ### cargo-gpu (required for SPIR-V / WebGPU)
 
-The crates.io version of `cargo-gpu` is outdated. Install from Git and let it set up its Rust
-toolchain:
+Install `cargo-gpu` from crates.io:
 
 ```bash
 cargo install cargo-gpu --version 0.10.0-alpha.1
@@ -40,11 +40,10 @@ cargo gpu install
 
 ### cargo-cuda (required for CUDA / PTX)
 
-`cargo-cuda` lives in this repository (`crates/cargo-cuda`). Install it from the workspace and
-build the `rustc_codegen_nvvm` codegen backend:
+Install `cargo-cuda` from crates.io:
 
 ```bash
-cargo install --path https://github.com/dimforge/khal cargo-cuda
+cargo install cargo-cuda --version 0.1.0
 cargo cuda install
 ```
 

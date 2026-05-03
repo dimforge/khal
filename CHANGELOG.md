@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+_Disclaimer: this changelog is updated using generative AI, but is still verified manually._
+
+## v0.1.0
+
+This shows the changes between the time of open-sourcing the crate and its first release to crates.io:
 
 ### Added
 - `println!` support for shaders running on the CPU backend (`khal-std`).
