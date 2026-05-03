@@ -1,6 +1,7 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
 
 use khal_std::glamx::UVec3;
+use khal_std::index::MaybeIndexUnchecked;
 use khal_std::macros::{spirv, spirv_bindgen};
 
 #[spirv_bindgen]
@@ -11,7 +12,7 @@ pub fn add_assign(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] b: &[f32],
 ) {
     let thread_id = invocation_id.x as usize;
-    if thread_id < a.len() {
-        a[thread_id] += b[thread_id];
+    if thread_id < a.len() && thread_id < b.len() {
+        *a.at_mut(thread_id) += b.read(thread_id);
     }
 }

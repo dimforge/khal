@@ -26,9 +26,6 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(target_arch, values("spirv"))',
 ] }
 
-[profile.release]
-incremental = true
-
 #[profile.release]
 #opt-level = 'z'
 
