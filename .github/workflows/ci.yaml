@@ -52,7 +52,7 @@ jobs:
 
       - name: Install cargo-gpu
         run: |
-          cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+          cargo install cargo-gpu --version 0.10.0-alpha.1
           cargo gpu install --auto-install-rust-toolchain
 
       - name: Run clippy lints
@@ -80,7 +80,7 @@ jobs:
 
       - name: Install cargo-gpu
         run: |
-          cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+          cargo install cargo-gpu --version 0.10.0-alpha.1
           cargo gpu install --auto-install-rust-toolchain
 
       - name: Check documentation
@@ -106,7 +106,7 @@ jobs:
           sweep-cache: true
       - name: Install cargo-gpu
         run: |
-          cargo install --git https://github.com/Rust-GPU/cargo-gpu cargo-gpu
+          cargo install cargo-gpu --version 0.10.0-alpha.1
           cargo gpu install --auto-install-rust-toolchain
       - name: Run Cargo Tests
         run: |
