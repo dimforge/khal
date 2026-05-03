@@ -3,6 +3,14 @@ name = "khal-example-shaders"
 version = "0.1.0"
 edition = "2024"
 publish = false
+# `links` declares a unique shader-crate identity so cargo will pass any
+# metadata emitted by this crate's `build.rs` to dependents (host crates) as
+# `DEP_KHAL_EXAMPLE_SHADERS_<KEY>` env vars. This is what lets the host crate's
+# `build.rs` locate the shader sources, whether they come from a workspace
+# path during development or from `~/.cargo/registry/src/...` once this crate
+# is published and pulled from crates.io.
+links = "khal-example-shaders"
+build = "build.rs"
 
 [features]
 cpu = ["khal-std/cpu"]

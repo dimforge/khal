@@ -41,6 +41,31 @@ impl KhalBuilder {
         builder
     }
 
+    /// Creates a new builder by locating the shader crate via cargo's `links`
+    /// metadata mechanism.
+    ///
+    /// `links_name` must match the `links` value declared in the shader
+    /// crate's `Cargo.toml`. The shader crate's `build.rs` must emit
+    /// `cargo::metadata=manifest_dir=$CARGO_MANIFEST_DIR`, and the host crate
+    /// must depend on the shader crate as a `[build-dependencies]` entry.
+    /// Cargo then exposes `DEP_<LINKS>_MANIFEST_DIR` to this build script,
+    /// which works identically for in-workspace path dependencies and for
+    /// versions fetched from a registry.
+    pub fn from_dependency(links_name: &str, enable_builtin_features: bool) -> Self {
+        let env_key = format!(
+            "DEP_{}_MANIFEST_DIR",
+            links_name.to_ascii_uppercase().replace('-', "_")
+        );
+        let manifest_dir = std::env::var(&env_key).unwrap_or_else(|_| {
+            panic!(
+                "environment variable `{env_key}` is not set; ensure `{links_name}` is declared \
+                 as a `[build-dependencies]` entry of the host crate and that its `build.rs` emits \
+                 `cargo::metadata=manifest_dir=$CARGO_MANIFEST_DIR`"
+            )
+        });
+        Self::new(manifest_dir, enable_builtin_features)
+    }
+
     /// Sets the `RUST_MIN_STACK` environment variable for the shader compilation processes.
     pub fn rust_min_stack(mut self, stack: u32) -> Self {
         self.rust_min_stack = stack;
