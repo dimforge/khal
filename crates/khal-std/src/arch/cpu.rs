@@ -91,8 +91,7 @@ fn take_stacks(count: usize) -> Vec<corosensei::stack::DefaultStack> {
         let mut pool = pool.borrow_mut();
         let reusable = count.min(pool.len());
         let drain_start = pool.len() - reusable;
-        let mut stacks: Vec<corosensei::stack::DefaultStack> =
-            pool.drain(drain_start..).collect();
+        let mut stacks: Vec<corosensei::stack::DefaultStack> = pool.drain(drain_start..).collect();
         for _ in stacks.len()..count {
             stacks.push(
                 corosensei::stack::DefaultStack::new(COROUTINE_STACK_SIZE)
