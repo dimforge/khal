@@ -3,7 +3,7 @@ name = "khal-std"
 authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
 description = "GPU standard library for khal compute shaders, with cross-platform primitives compiling to SPIR-V, CUDA PTX, and CPU targets."
 repository = "https://github.com/dimforge/khal"
-version = "0.1.0"
+version = { workspace = true }
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

@@ -3,7 +3,7 @@ name = "khal-builder"
 authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
 description = "Build-time utilities for compiling khal shader crates to SPIR-V and CUDA PTX."
 repository = "https://github.com/dimforge/khal"
-version = "0.1.0"
+version = { workspace = true }
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
