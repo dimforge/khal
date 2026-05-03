@@ -19,3 +19,9 @@ khal-example-shaders = { path = "../khal-example-shaders" }
 
 [build-dependencies]
 khal-builder = { version = "0.1.0", path = "../khal-builder" }
+# Listed as a build-dep (in addition to the regular `[dependencies]` entry
+# above) so cargo runs the shader crate's `build.rs` before ours and
+# forwards its `DEP_KHAL_EXAMPLE_SHADERS_MANIFEST_DIR` env var to our
+# `build.rs`. Without this line our `build.rs` would have no way to locate
+# the shader sources when this crate is consumed from crates.io.
+khal-example-shaders = { path = "../khal-example-shaders" }
