@@ -1,7 +1,11 @@
 [package]
 name = "khal-std"
+authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
+description = "GPU standard library for khal compute shaders, with cross-platform primitives compiling to SPIR-V, CUDA PTX, and CPU targets."
+repository = "https://github.com/dimforge/khal"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [features]
 cpu = ["corosensei"]
@@ -25,7 +29,7 @@ glamx = { version = "0.2", default-features = false, features = ["nostd-libm", "
 rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
 spirv-std-macros = "0.10.0-alpha.1"
-khal-derive = { path = "../khal-derive" }
+khal-derive = { version = "0.1.0", path = "../khal-derive" }
 
 [lints]
 workspace = true

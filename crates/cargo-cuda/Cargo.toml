@@ -1,8 +1,10 @@
 [package]
 name = "cargo-cuda"
+authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
 version = "0.1.0"
 edition = "2024"
 description = "CLI tool for compiling Rust GPU shader crates to PTX using the Rust-CUDA toolchain."
+repository = "https://github.com/dimforge/khal"
 license = "MIT OR Apache-2.0"
 
 [[bin]]

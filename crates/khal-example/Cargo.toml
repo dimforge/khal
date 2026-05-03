@@ -2,6 +2,7 @@
 name = "khal-example"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [features]
 default = ["webgpu"]
@@ -11,10 +12,10 @@ cpu-parallel = ["cpu", "khal-example-shaders/cpu-parallel"]
 cuda = ["khal/cuda", "khal-builder/cuda", "khal-example-shaders/cuda"]
 
 [dependencies]
-khal = { path = "../khal", features = ["derive"] }
+khal = { version = "0.1.0", path = "../khal", features = ["derive"] }
 include_dir = "0.7"
 async-std = { version = "1", features = ["attributes"] }
 khal-example-shaders = { path = "../khal-example-shaders" }
 
 [build-dependencies]
-khal-builder = { path = "../khal-builder" }
+khal-builder = { version = "0.1.0", path = "../khal-builder" }

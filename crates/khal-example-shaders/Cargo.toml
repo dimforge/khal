@@ -2,6 +2,7 @@
 name = "khal-example-shaders"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [features]
 cpu = ["khal-std/cpu"]
@@ -15,4 +16,4 @@ khal-std = { path = "../khal-std" }
 workspace = true
 
 [target.'cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))'.dependencies]
-khal = { path = "../khal", features = ["derive"] }
+khal = { version = "0.1.0", path = "../khal", features = ["derive"] }
