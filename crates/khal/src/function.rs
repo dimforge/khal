@@ -58,6 +58,8 @@ impl<Args: ShaderArgsType> GpuFunction<Args> {
             InnerGpuFunction::WebGpu(f) => GpuFunction::WebGpu(f, PhantomData),
             #[cfg(feature = "cuda")]
             InnerGpuFunction::Cuda(f) => GpuFunction::Cuda(f, PhantomData),
+            #[cfg(feature = "metal")]
+            InnerGpuFunction::Metal(f) => GpuFunction::Metal(f, PhantomData),
             InnerGpuFunction::Noop => GpuFunction::Noop(PhantomData),
         }
     }
@@ -69,6 +71,8 @@ impl<Args: ShaderArgsType> GpuFunction<Args> {
             GpuFunction::WebGpu(f, _) => InnerGpuFunction::WebGpu(f.clone()),
             #[cfg(feature = "cuda")]
             GpuFunction::Cuda(f, _) => InnerGpuFunction::Cuda(f.clone()),
+            #[cfg(feature = "metal")]
+            GpuFunction::Metal(f, _) => InnerGpuFunction::Metal(f.clone()),
             GpuFunction::Noop(_) => InnerGpuFunction::Noop,
         }
     }
