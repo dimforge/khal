@@ -23,6 +23,12 @@ pub mod num_traits;
 /// Synchronization primitives (barriers, atomics).
 pub mod sync;
 
+/// Build-script helpers for shader crates. Host-only.
+#[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+pub mod build_script;
+#[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+pub use build_script::*;
+
 /// Re-export of the `glamx` math library.
 pub use glamx;
 
