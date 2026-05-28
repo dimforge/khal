@@ -25,7 +25,7 @@ cuda = []
 unsafe_remove_boundchecks = []
 
 [dependencies]
-glamx = { version = "0.2", default-features = false, features = ["nostd-libm", "bytemuck"] }
+glamx = { version = "0.3", default-features = false, features = ["nostd-libm", "bytemuck", "u32", "i32", "f64"] }
 rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
 spirv-std-macros = "0.10.0-alpha.1"

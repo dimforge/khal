@@ -6,6 +6,12 @@ use crate::backend::cuda::{
     CudaEncoder as CudaEncoderInner, CudaFunction as CudaFunctionInner,
     CudaModule as CudaModuleInner, CudaPass as CudaPassInner, CudaTimestamps,
 };
+#[cfg(feature = "metal")]
+use crate::backend::metal::{
+    Metal, MetalBackendError, MetalBuffer, MetalBufferSlice, MetalDispatch as MetalDispatchInner,
+    MetalEncoder as MetalEncoderInner, MetalFunction as MetalFunctionInner,
+    MetalModule as MetalModuleInner, MetalPass as MetalPassInner, MetalTimestamps,
+};
 #[cfg(feature = "webgpu")]
 use crate::backend::webgpu::CommandEncoderExt;
 use crate::backend::webgpu::WebGpuTimestamps;
@@ -30,6 +36,8 @@ pub enum GpuBackend {
     WebGpu(WebGpu),
     #[cfg(feature = "cuda")]
     Cuda(Cuda),
+    #[cfg(feature = "metal")]
+    Metal(Metal),
     #[cfg(feature = "cpu")]
     Cpu,
 }
@@ -42,6 +50,8 @@ impl GpuBackend {
             Self::WebGpu(_) => super::CompileTarget::Wgsl,
             #[cfg(feature = "cuda")]
             Self::Cuda(_) => super::CompileTarget::Ptx,
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => super::CompileTarget::Spirv,
             #[cfg(feature = "cpu")]
             Self::Cpu => super::CompileTarget::Wgsl,
         }
@@ -51,6 +61,12 @@ impl GpuBackend {
     #[cfg(feature = "cuda")]
     pub fn is_cuda(&self) -> bool {
         matches!(self, Self::Cuda(..))
+    }
+
+    /// Returns `true` if this is the Metal backend.
+    #[cfg(feature = "metal")]
+    pub fn is_metal(&self) -> bool {
+        matches!(self, Self::Metal(..))
     }
 
     /// Loads a SPIR-V module using passthrough loading (bypassing naga validation).
@@ -73,6 +89,8 @@ impl GpuBackend {
             // For non-WebGPU backends, SPIR-V is already loaded natively.
             #[cfg(feature = "cuda")]
             Self::Cuda(_) => <Self as Backend>::load_module_bytes(self, bytes),
+            #[cfg(feature = "metal")]
+            Self::Metal(_) => <Self as Backend>::load_module_bytes(self, bytes),
             #[cfg(feature = "cpu")]
             Self::Cpu => <Self as Backend>::load_module_bytes(self, bytes),
         }
@@ -86,6 +104,8 @@ pub enum GpuBuffer<T: DeviceValue> {
     WebGpu(<WebGpu as Backend>::Buffer<T>),
     #[cfg(feature = "cuda")]
     Cuda(CudaBuffer<T>),
+    #[cfg(feature = "metal")]
+    Metal(MetalBuffer<T>),
     #[cfg(feature = "cpu")]
     Cpu(Vec<T>),
 }
@@ -158,6 +178,8 @@ impl<'a, T: DeviceValue> AsGpuSlice<T> for GpuBufferSlice<'a, T> {
             Self::WebGpu(s) => GpuBufferSlice::WebGpu(*s),
             #[cfg(feature = "cuda")]
             Self::Cuda(s) => GpuBufferSlice::Cuda(*s),
+            #[cfg(feature = "metal")]
+            Self::Metal(s) => GpuBufferSlice::Metal(*s),
             #[cfg(feature = "cpu")]
             Self::Cpu(s) => GpuBufferSlice::Cpu(s),
         }
@@ -171,6 +193,8 @@ impl<'a, T: DeviceValue> AsGpuSliceMut<T> for GpuBufferSliceMut<'a, T> {
             Self::WebGpu(s) => GpuBufferSliceMut::WebGpu(*s),
             #[cfg(feature = "cuda")]
             Self::Cuda(s) => GpuBufferSliceMut::Cuda(*s),
+            #[cfg(feature = "metal")]
+            Self::Metal(s) => GpuBufferSliceMut::Metal(*s),
             #[cfg(feature = "cpu")]
             Self::Cpu(s) => GpuBufferSliceMut::Cpu(s),
         }
@@ -210,6 +234,8 @@ pub enum GpuBufferSlice<'a, T: DeviceValue> {
     WebGpu(<WebGpu as Backend>::BufferSlice<'a, T>),
     #[cfg(feature = "cuda")]
     Cuda(CudaBufferSlice),
+    #[cfg(feature = "metal")]
+    Metal(MetalBufferSlice<'a>),
     #[cfg(feature = "cpu")]
     Cpu(&'a [T]),
 }
@@ -250,6 +276,8 @@ impl<'a, T: DeviceValue + bytemuck::Pod> GpuBufferSlice<'a, T> {
             Self::WebGpu(slice) => GpuBufferSlice::WebGpu(slice),
             #[cfg(feature = "cuda")]
             Self::Cuda(slice) => GpuBufferSlice::Cuda(slice),
+            #[cfg(feature = "metal")]
+            Self::Metal(slice) => GpuBufferSlice::Metal(slice),
             #[cfg(feature = "cpu")]
             Self::Cpu(slice) => GpuBufferSlice::Cpu(bytemuck::cast_slice(slice)),
         }
@@ -290,6 +318,17 @@ impl<'a, T: DeviceValue + bytemuck::Pod> GpuBufferSlice<'a, T> {
                 );
                 GpuBufferSlice::Cuda(slice)
             }
+            #[cfg(feature = "metal")]
+            Self::Metal(slice) => {
+                let target_size = core::mem::size_of::<U>() as u64;
+                assert!(
+                    target_size > 0 && slice.byte_len % target_size == 0,
+                    "Cannot reinterpret Metal buffer: byte length {} is not a multiple of size_of::<{}>()",
+                    slice.byte_len,
+                    core::any::type_name::<U>()
+                );
+                GpuBufferSlice::Metal(slice)
+            }
             #[cfg(feature = "cpu")]
             Self::Cpu(slice) => GpuBufferSlice::Cpu(bytemuck::cast_slice(slice)),
         }
@@ -303,6 +342,8 @@ pub enum GpuBufferSliceMut<'a, T: DeviceValue> {
     WebGpu(<WebGpu as Backend>::BufferSlice<'a, T>), // TODO: add a mut version of ::BufferSlice?
     #[cfg(feature = "cuda")]
     Cuda(CudaBufferSlice),
+    #[cfg(feature = "metal")]
+    Metal(MetalBufferSlice<'a>),
     #[cfg(feature = "cpu")]
     Cpu(&'a mut [T]),
 }
@@ -325,6 +366,8 @@ impl<'a, T: DeviceValue + bytemuck::Pod> GpuBufferSliceMut<'a, T> {
             Self::WebGpu(slice) => GpuBufferSliceMut::WebGpu(slice),
             #[cfg(feature = "cuda")]
             Self::Cuda(slice) => GpuBufferSliceMut::Cuda(slice),
+            #[cfg(feature = "metal")]
+            Self::Metal(slice) => GpuBufferSliceMut::Metal(slice),
             #[cfg(feature = "cpu")]
             Self::Cpu(slice) => GpuBufferSliceMut::Cpu(bytemuck::cast_slice_mut(slice)),
         }
@@ -363,6 +406,17 @@ impl<'a, T: DeviceValue + bytemuck::Pod> GpuBufferSliceMut<'a, T> {
                 );
                 GpuBufferSliceMut::Cuda(slice)
             }
+            #[cfg(feature = "metal")]
+            Self::Metal(slice) => {
+                let target_size = core::mem::size_of::<U>() as u64;
+                assert!(
+                    target_size > 0 && slice.byte_len % target_size == 0,
+                    "Cannot reinterpret Metal buffer: byte length {} is not a multiple of size_of::<{}>()",
+                    slice.byte_len,
+                    core::any::type_name::<U>()
+                );
+                GpuBufferSliceMut::Metal(slice)
+            }
             #[cfg(feature = "cpu")]
             Self::Cpu(slice) => GpuBufferSliceMut::Cpu(bytemuck::cast_slice_mut(slice)),
         }
@@ -387,6 +441,8 @@ pub enum GpuEncoder {
     WebGpu(<WebGpu as Backend>::Encoder),
     #[cfg(feature = "cuda")]
     Cuda(CudaEncoderInner),
+    #[cfg(feature = "metal")]
+    Metal(MetalEncoderInner),
     #[cfg(feature = "cpu")]
     Cpu,
     Noop,
@@ -400,6 +456,8 @@ pub enum GpuPass {
     WebGpu(<WebGpu as Backend>::Pass),
     #[cfg(feature = "cuda")]
     Cuda(CudaPassInner),
+    #[cfg(feature = "metal")]
+    Metal(MetalPassInner),
     #[cfg(feature = "cpu")]
     Cpu(Option<CpuPassTimer>),
     Noop,
@@ -440,6 +498,28 @@ impl GpuPass {
         matches!(self, Self::Cuda(..))
     }
 
+    /// Inserts a buffer-scope memory barrier between dispatches within
+    /// this compute pass.
+    ///
+    /// Backends that auto-insert barriers between consecutive dispatches
+    /// (WebGPU/wgpu, CUDA's stream-ordered execution, CPU, Noop) treat
+    /// this as a no-op. The native Metal backend, which uses
+    /// `MTLDispatchType::Concurrent`, emits a real
+    /// `memoryBarrierWithScope:MTLBarrierScopeBuffers` so subsequent
+    /// dispatches see writes from earlier dispatches in the same pass.
+    ///
+    /// Call this between two dispatches inside a single
+    /// [`GpuEncoder::begin_pass`] when the second reads from a buffer
+    /// the first wrote to. No barrier is needed across pass boundaries —
+    /// `begin_pass` / `end_pass` already synchronize on every backend.
+    pub fn memory_barrier(&mut self) {
+        match self {
+            #[cfg(feature = "metal")]
+            Self::Metal(pass) => pass.memory_barrier(),
+            _ => {}
+        }
+    }
+
     /// Begins a compute dispatch within this pass, binding the given function.
     pub fn begin_dispatch<'a>(&'a mut self, function: &'a InnerGpuFunction) -> GpuDispatch<'a> {
         match (self, function) {
@@ -455,6 +535,17 @@ impl GpuPass {
                 #[cfg(feature = "push_constants")]
                 push_constants: Vec::new(),
             }),
+            #[cfg(feature = "metal")]
+            (Self::Metal(pass), InnerGpuFunction::Metal(f)) => {
+                pass.encoder.set_compute_pipeline_state(&f.pipeline);
+                GpuDispatch::Metal(MetalDispatchInner {
+                    encoder: &pass.encoder,
+                    function: f,
+                    args: Vec::new(),
+                    #[cfg(feature = "push_constants")]
+                    push_constants: Vec::new(),
+                })
+            }
             #[cfg(feature = "cpu")]
             (Self::Cpu(_), InnerGpuFunction::Noop) => GpuDispatch::Noop,
             (Self::Noop, InnerGpuFunction::Noop) => GpuDispatch::Noop,
@@ -470,6 +561,8 @@ pub enum GpuModule {
     WebGpu(<WebGpu as Backend>::Module),
     #[cfg(feature = "cuda")]
     Cuda(CudaModuleInner),
+    #[cfg(feature = "metal")]
+    Metal(MetalModuleInner),
     Noop,
 }
 
@@ -505,6 +598,8 @@ pub enum GpuFunction<Args: ShaderArgsType = ()> {
     WebGpu(<WebGpu as Backend>::Function, PhantomData<Args>),
     #[cfg(feature = "cuda")]
     Cuda(CudaFunctionInner, PhantomData<Args>),
+    #[cfg(feature = "metal")]
+    Metal(MetalFunctionInner, PhantomData<Args>),
     Noop(PhantomData<Args>),
 }
 
@@ -519,6 +614,8 @@ pub enum InnerGpuFunction {
     WebGpu(<WebGpu as Backend>::Function),
     #[cfg(feature = "cuda")]
     Cuda(CudaFunctionInner),
+    #[cfg(feature = "metal")]
+    Metal(MetalFunctionInner),
     Noop,
 }
 
@@ -530,6 +627,8 @@ pub enum GpuDispatch<'a> {
     WebGpu(<WebGpu as Backend>::Dispatch<'a>),
     #[cfg(feature = "cuda")]
     Cuda(CudaDispatchInner<'a>),
+    #[cfg(feature = "metal")]
+    Metal(MetalDispatchInner<'a>),
     Noop,
     #[doc(hidden)]
     _Phantom(std::marker::PhantomData<&'a ()>),
@@ -545,6 +644,9 @@ pub enum GpuBackendError {
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     Cuda(#[from] CudaBackendError),
+    #[cfg(feature = "metal")]
+    #[error(transparent)]
+    Metal(#[from] MetalBackendError),
     #[error(transparent)]
     ShaderArgs(#[from] ShaderArgsError),
     #[error("GPU context not found in local storage")]
@@ -586,6 +688,8 @@ pub enum GpuTimestamps {
     WebGpu(WebGpuTimestamps),
     #[cfg(feature = "cuda")]
     Cuda(CudaTimestamps),
+    #[cfg(feature = "metal")]
+    Metal(MetalTimestamps),
     #[cfg(feature = "cpu")]
     Cpu(CpuTimestamps),
     Noop,
@@ -603,6 +707,10 @@ impl GpuTimestamps {
                 .unwrap_or(GpuTimestamps::Noop),
             #[cfg(feature = "cuda")]
             GpuBackend::Cuda(cuda) => GpuTimestamps::Cuda(CudaTimestamps::new(cuda)),
+            #[cfg(feature = "metal")]
+            GpuBackend::Metal(metal) => MetalTimestamps::new(metal, capacity)
+                .map(GpuTimestamps::Metal)
+                .unwrap_or(GpuTimestamps::Noop),
             #[cfg(feature = "cpu")]
             GpuBackend::Cpu => GpuTimestamps::Cpu(CpuTimestamps::new()),
             #[allow(unreachable_patterns)]
@@ -622,6 +730,8 @@ impl GpuTimestamps {
             GpuTimestamps::WebGpu(ts) => ts.reset(),
             #[cfg(feature = "cuda")]
             GpuTimestamps::Cuda(ts) => ts.reset(),
+            #[cfg(feature = "metal")]
+            GpuTimestamps::Metal(ts) => ts.reset(),
             #[cfg(feature = "cpu")]
             GpuTimestamps::Cpu(ts) => ts.entries.lock().unwrap().clear(),
             GpuTimestamps::Noop => {}
@@ -649,6 +759,8 @@ impl GpuTimestamps {
             (GpuTimestamps::WebGpu(ts), GpuBackend::WebGpu(webgpu)) => ts.read(webgpu).await,
             #[cfg(feature = "cuda")]
             (GpuTimestamps::Cuda(ts), _) => Ok(ts.read()?),
+            #[cfg(feature = "metal")]
+            (GpuTimestamps::Metal(ts), _) => Ok(ts.read()?),
             #[cfg(feature = "cpu")]
             (GpuTimestamps::Cpu(ts), _) => Ok(ts.entries.lock().unwrap().clone()),
             _ => Ok(Vec::new()),
@@ -679,6 +791,8 @@ impl Backend for GpuBackend {
             Self::WebGpu(backend) => Ok(GpuModule::WebGpu(backend.load_module(data)?)),
             #[cfg(feature = "cuda")]
             Self::Cuda(backend) => Ok(GpuModule::Cuda(backend.load_module(data)?)),
+            #[cfg(feature = "metal")]
+            Self::Metal(backend) => Ok(GpuModule::Metal(backend.load_module(data)?)),
             #[cfg(feature = "cpu")]
             Self::Cpu => Ok(GpuModule::Noop),
         }
@@ -690,6 +804,8 @@ impl Backend for GpuBackend {
             Self::WebGpu(backend) => Ok(GpuModule::WebGpu(backend.load_module_bytes(bytes)?)),
             #[cfg(feature = "cuda")]
             Self::Cuda(backend) => Ok(GpuModule::Cuda(backend.load_module_bytes(bytes)?)),
+            #[cfg(feature = "metal")]
+            Self::Metal(backend) => Ok(GpuModule::Metal(backend.load_module_bytes(bytes)?)),
             #[cfg(feature = "cpu")]
             Self::Cpu => Ok(GpuModule::Noop),
         }
@@ -708,6 +824,10 @@ impl Backend for GpuBackend {
             )),
             #[cfg(feature = "cuda")]
             (Self::Cuda(backend), GpuModule::Cuda(module)) => Ok(InnerGpuFunction::Cuda(
+                backend.load_function(module, entry_point, push_constant_size)?,
+            )),
+            #[cfg(feature = "metal")]
+            (Self::Metal(backend), GpuModule::Metal(module)) => Ok(InnerGpuFunction::Metal(
                 backend.load_function(module, entry_point, push_constant_size)?,
             )),
             #[cfg(feature = "cpu")]
@@ -742,6 +862,15 @@ impl Backend for GpuBackend {
                     layouts,
                 )?))
             }
+            #[cfg(feature = "metal")]
+            (Self::Metal(backend), GpuModule::Metal(module)) => Ok(InnerGpuFunction::Metal(
+                backend.load_function_with_layouts(
+                    module,
+                    entry_point,
+                    push_constant_size,
+                    layouts,
+                )?,
+            )),
             #[cfg(feature = "cpu")]
             (Self::Cpu, GpuModule::Noop) => Ok(InnerGpuFunction::Noop),
             _ => panic!("Invalid backend/module type pair"),
@@ -757,6 +886,8 @@ impl Backend for GpuBackend {
             Self::WebGpu(backend) => GpuEncoder::WebGpu(backend.begin_encoding()),
             #[cfg(feature = "cuda")]
             Self::Cuda(backend) => GpuEncoder::Cuda(backend.begin_encoding()),
+            #[cfg(feature = "metal")]
+            Self::Metal(backend) => GpuEncoder::Metal(backend.begin_encoding()),
             #[cfg(feature = "cpu")]
             Self::Cpu => GpuEncoder::Cpu,
         }
@@ -776,6 +907,10 @@ impl Backend for GpuBackend {
             (Self::Cuda(backend), GpuPass::Cuda(pass), InnerGpuFunction::Cuda(function)) => {
                 GpuDispatch::Cuda(backend.begin_dispatch(pass, function))
             }
+            #[cfg(feature = "metal")]
+            (Self::Metal(backend), GpuPass::Metal(pass), InnerGpuFunction::Metal(function)) => {
+                GpuDispatch::Metal(backend.begin_dispatch(pass, function))
+            }
             #[cfg(feature = "cpu")]
             (Self::Cpu, GpuPass::Cpu(_), InnerGpuFunction::Noop) => GpuDispatch::Noop,
             (_, GpuPass::Noop, InnerGpuFunction::Noop) => GpuDispatch::Noop,
@@ -789,6 +924,8 @@ impl Backend for GpuBackend {
             (Self::WebGpu(backend), GpuEncoder::WebGpu(encoder)) => Ok(backend.submit(encoder)?),
             #[cfg(feature = "cuda")]
             (Self::Cuda(backend), GpuEncoder::Cuda(encoder)) => Ok(backend.submit(encoder)?),
+            #[cfg(feature = "metal")]
+            (Self::Metal(backend), GpuEncoder::Metal(encoder)) => Ok(backend.submit(encoder)?),
             #[cfg(feature = "cpu")]
             (Self::Cpu, GpuEncoder::Cpu) => Ok(()),
             _ => panic!("Invalid backend/encoder type pair"),
@@ -808,6 +945,8 @@ impl Backend for GpuBackend {
             GpuBackend::WebGpu(backend) => Ok(GpuBuffer::WebGpu(backend.init_buffer(data, usage)?)),
             #[cfg(feature = "cuda")]
             GpuBackend::Cuda(backend) => Ok(GpuBuffer::Cuda(backend.init_buffer(data, usage)?)),
+            #[cfg(feature = "metal")]
+            GpuBackend::Metal(backend) => Ok(GpuBuffer::Metal(backend.init_buffer(data, usage)?)),
             #[cfg(feature = "cpu")]
             GpuBackend::Cpu => Ok(GpuBuffer::Cpu(data.to_vec())),
         }
@@ -826,6 +965,10 @@ impl Backend for GpuBackend {
             #[cfg(feature = "cuda")]
             GpuBackend::Cuda(backend) => {
                 Ok(GpuBuffer::Cuda(backend.uninit_buffer::<T>(len, usage)?))
+            }
+            #[cfg(feature = "metal")]
+            GpuBackend::Metal(backend) => {
+                Ok(GpuBuffer::Metal(backend.uninit_buffer::<T>(len, usage)?))
             }
             #[cfg(feature = "cpu")]
             GpuBackend::Cpu => {
@@ -852,6 +995,10 @@ impl Backend for GpuBackend {
             (GpuBackend::Cuda(backend), GpuBuffer::Cuda(buffer)) => {
                 backend.write_buffer(buffer, offset, data)?
             }
+            #[cfg(feature = "metal")]
+            (GpuBackend::Metal(backend), GpuBuffer::Metal(buffer)) => {
+                backend.write_buffer(buffer, offset, data)?
+            }
             #[cfg(feature = "cpu")]
             (GpuBackend::Cpu, GpuBuffer::Cpu(buffer)) => {
                 let start = offset as usize;
@@ -870,6 +1017,8 @@ impl Backend for GpuBackend {
             GpuBackend::WebGpu(backend) => Ok(backend.synchronize()?),
             #[cfg(feature = "cuda")]
             GpuBackend::Cuda(backend) => Ok(backend.synchronize()?),
+            #[cfg(feature = "metal")]
+            GpuBackend::Metal(backend) => Ok(backend.synchronize()?),
             #[cfg(feature = "cpu")]
             GpuBackend::Cpu => Ok(()),
         }
@@ -887,6 +1036,10 @@ impl Backend for GpuBackend {
             }
             #[cfg(feature = "cuda")]
             (GpuBackend::Cuda(backend), GpuBuffer::Cuda(buffer)) => {
+                backend.read_buffer(buffer, out).await?
+            }
+            #[cfg(feature = "metal")]
+            (GpuBackend::Metal(backend), GpuBuffer::Metal(buffer)) => {
                 backend.read_buffer(buffer, out).await?
             }
             #[cfg(feature = "cpu")]
@@ -911,6 +1064,10 @@ impl Backend for GpuBackend {
             }
             #[cfg(feature = "cuda")]
             (GpuBackend::Cuda(backend), GpuBuffer::Cuda(buffer)) => {
+                backend.slow_read_buffer(buffer, out).await?
+            }
+            #[cfg(feature = "metal")]
+            (GpuBackend::Metal(backend), GpuBuffer::Metal(buffer)) => {
                 backend.slow_read_buffer(buffer, out).await?
             }
             #[cfg(feature = "cpu")]
@@ -941,6 +1098,14 @@ impl Encoder<GpuBackend> for GpuEncoder {
                     GpuPass::Cuda(encoder.begin_pass(label, Some(ts)))
                 } else {
                     GpuPass::Cuda(encoder.begin_pass(label, None))
+                }
+            }
+            #[cfg(feature = "metal")]
+            GpuEncoder::Metal(encoder) => {
+                if let Some(GpuTimestamps::Metal(ts)) = timestamps {
+                    GpuPass::Metal(encoder.begin_pass(label, Some(ts)))
+                } else {
+                    GpuPass::Metal(encoder.begin_pass(label, None))
                 }
             }
             #[cfg(feature = "cpu")]
@@ -991,6 +1156,17 @@ impl Encoder<GpuBackend> for GpuEncoder {
                     copy_len,
                 )?;
             }
+            #[cfg(feature = "metal")]
+            (GpuEncoder::Metal(encoder), GpuBuffer::Metal(source), GpuBuffer::Metal(target)) => {
+                Encoder::<Metal>::copy_buffer_to_buffer::<T>(
+                    encoder,
+                    source,
+                    source_offset,
+                    target,
+                    target_offset,
+                    copy_len,
+                )?;
+            }
             #[cfg(feature = "cpu")]
             (GpuEncoder::Cpu, GpuBuffer::Cpu(source), GpuBuffer::Cpu(target)) => {
                 target[target_offset..target_offset + copy_len]
@@ -999,6 +1175,19 @@ impl Encoder<GpuBackend> for GpuEncoder {
             _ => panic!("Invalid encoder/buffer type combination"),
         }
         Ok(())
+    }
+
+    fn memory_barrier(&mut self, pass: &mut GpuPass) {
+        match (self, pass) {
+            #[cfg(feature = "metal")]
+            (GpuEncoder::Metal(encoder), GpuPass::Metal(pass)) => {
+                Encoder::<Metal>::memory_barrier(encoder, pass);
+            }
+            // Backends that already auto-insert barriers between dispatches
+            // (WebGPU/wgpu, CUDA's stream-ordered execution, CPU, Noop) treat
+            // this as a no-op.
+            _ => {}
+        }
     }
 }
 
@@ -1010,6 +1199,8 @@ impl<'a> Dispatch<'a, GpuBackend> for GpuDispatch<'a> {
             GpuDispatch::WebGpu(dispatch) => dispatch.set_push_constants(data),
             #[cfg(feature = "cuda")]
             GpuDispatch::Cuda(dispatch) => dispatch.set_push_constants(data),
+            #[cfg(feature = "metal")]
+            GpuDispatch::Metal(dispatch) => dispatch.set_push_constants(data),
             GpuDispatch::Noop => {}
             GpuDispatch::_Phantom(_) => unreachable!(),
         }
@@ -1049,6 +1240,20 @@ impl<'a> Dispatch<'a, GpuBackend> for GpuDispatch<'a> {
                 };
                 dispatch.launch(cuda_grid, block_dim)?;
             }
+            #[cfg(feature = "metal")]
+            GpuDispatch::Metal(dispatch) => {
+                let grid: DispatchGrid<'b, GpuBackend> = grid.into();
+                let metal_grid = match grid {
+                    DispatchGrid::Grid(dims) => DispatchGrid::Grid(dims),
+                    DispatchGrid::ThreadCount(threads) => DispatchGrid::ThreadCount(threads),
+                    DispatchGrid::Indirect(buffer) => match buffer {
+                        GpuBuffer::Metal(buf) => DispatchGrid::Indirect(buf),
+                        #[allow(unreachable_patterns)]
+                        _ => panic!("Invalid buffer type for Metal dispatch"),
+                    },
+                };
+                dispatch.launch(metal_grid, block_dim)?;
+            }
             GpuDispatch::Noop => {}
             GpuDispatch::_Phantom(_) => unreachable!(),
         }
@@ -1067,6 +1272,8 @@ impl CommandEncoderExt for GpuEncoder {
             GpuEncoder::WebGpu(encoder) => encoder.compute_pass(label),
             #[cfg(feature = "cuda")]
             GpuEncoder::Cuda(_) => panic!("Cannot create compute pass from non-WebGpu encoder"),
+            #[cfg(feature = "metal")]
+            GpuEncoder::Metal(_) => panic!("Cannot create compute pass from non-WebGpu encoder"),
             #[cfg(feature = "cpu")]
             GpuEncoder::Cpu => panic!("Cannot create compute pass from non-WebGpu encoder"),
             GpuEncoder::Noop => panic!("Cannot create compute pass from non-WebGpu encoder"),
@@ -1100,6 +1307,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBuffer<T> {
                 dispatch.set_arg(binding, buffer.device_ptr_raw(), buffer.byte_len());
                 Ok(())
             }
+            #[cfg(feature = "metal")]
+            (GpuBuffer::Metal(buffer), GpuDispatch::Metal(dispatch)) => {
+                dispatch.set_arg(binding, buffer.raw(), 0, buffer.byte_len() as u64);
+                Ok(())
+            }
             #[cfg(feature = "cpu")]
             (GpuBuffer::Cpu(_), GpuDispatch::Noop) => Ok(()),
             _ => panic!("Invalid buffer/dispatch type combination"),
@@ -1125,6 +1337,16 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSlice<'_, T> {
             #[cfg(feature = "cuda")]
             (GpuBufferSlice::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
                 dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                Ok(())
+            }
+            #[cfg(feature = "metal")]
+            (GpuBufferSlice::Metal(slice), GpuDispatch::Metal(dispatch)) => {
+                dispatch.set_arg(
+                    binding,
+                    slice.buffer(),
+                    slice.byte_offset(),
+                    slice.byte_len(),
+                );
                 Ok(())
             }
             #[cfg(feature = "cpu")]
@@ -1154,6 +1376,16 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSliceMut<'_, T> {
                 dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
                 Ok(())
             }
+            #[cfg(feature = "metal")]
+            (GpuBufferSliceMut::Metal(slice), GpuDispatch::Metal(dispatch)) => {
+                dispatch.set_arg(
+                    binding,
+                    slice.buffer(),
+                    slice.byte_offset(),
+                    slice.byte_len(),
+                );
+                Ok(())
+            }
             #[cfg(feature = "cpu")]
             (GpuBufferSliceMut::Cpu(_), GpuDispatch::Noop) => Ok(()),
             _ => panic!("Invalid mutable buffer slice/dispatch type combination"),
@@ -1175,6 +1407,11 @@ impl<T: DeviceValue> GpuBuffer<T> {
             GpuBuffer::Cuda(buffer) => {
                 use crate::backend::Buffer;
                 GpuBufferSliceMut::Cuda(Buffer::<Cuda, T>::slice(buffer, range))
+            }
+            #[cfg(feature = "metal")]
+            GpuBuffer::Metal(buffer) => {
+                use crate::backend::Buffer;
+                GpuBufferSliceMut::Metal(Buffer::<Metal, T>::slice(buffer, range))
             }
             #[cfg(feature = "cpu")]
             GpuBuffer::Cpu(buffer) => {
@@ -1205,6 +1442,11 @@ impl<T: DeviceValue> crate::backend::Buffer<GpuBackend, T> for GpuBuffer<T> {
                 use crate::backend::Buffer;
                 Buffer::<Cuda, T>::is_empty(buffer)
             }
+            #[cfg(feature = "metal")]
+            GpuBuffer::Metal(buffer) => {
+                use crate::backend::Buffer;
+                Buffer::<Metal, T>::is_empty(buffer)
+            }
             #[cfg(feature = "cpu")]
             GpuBuffer::Cpu(buffer) => buffer.is_empty(),
         }
@@ -1222,6 +1464,11 @@ impl<T: DeviceValue> crate::backend::Buffer<GpuBackend, T> for GpuBuffer<T> {
                 use crate::backend::Buffer;
                 Buffer::<Cuda, T>::len(buffer)
             }
+            #[cfg(feature = "metal")]
+            GpuBuffer::Metal(buffer) => {
+                use crate::backend::Buffer;
+                Buffer::<Metal, T>::len(buffer)
+            }
             #[cfg(feature = "cpu")]
             GpuBuffer::Cpu(buffer) => buffer.len(),
         }
@@ -1238,6 +1485,11 @@ impl<T: DeviceValue> crate::backend::Buffer<GpuBackend, T> for GpuBuffer<T> {
             GpuBuffer::Cuda(buffer) => {
                 use crate::backend::Buffer;
                 GpuBufferSlice::Cuda(Buffer::<Cuda, T>::slice(buffer, range))
+            }
+            #[cfg(feature = "metal")]
+            GpuBuffer::Metal(buffer) => {
+                use crate::backend::Buffer;
+                GpuBufferSlice::Metal(Buffer::<Metal, T>::slice(buffer, range))
             }
             #[cfg(feature = "cpu")]
             GpuBuffer::Cpu(buffer) => {
@@ -1270,6 +1522,11 @@ impl<T: DeviceValue> crate::backend::Buffer<GpuBackend, T> for GpuBuffer<T> {
             GpuBuffer::Cuda(buffer) => {
                 use crate::backend::Buffer;
                 Buffer::<Cuda, T>::usage(buffer)
+            }
+            #[cfg(feature = "metal")]
+            GpuBuffer::Metal(buffer) => {
+                use crate::backend::Buffer;
+                Buffer::<Metal, T>::usage(buffer)
             }
             #[cfg(feature = "cpu")]
             GpuBuffer::Cpu(_) => BufferUsages::all(), // CPU buffers have no usage restrictions

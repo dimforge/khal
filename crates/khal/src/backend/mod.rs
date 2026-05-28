@@ -24,6 +24,11 @@ pub use cuda::Cuda;
 #[cfg(feature = "cuda")]
 pub mod cuda;
 
+#[cfg(feature = "metal")]
+pub use metal::Metal;
+#[cfg(feature = "metal")]
+pub mod metal;
+
 mod any_backend;
 pub use any_backend::*;
 
@@ -180,6 +185,12 @@ pub trait Backend: 'static + Sized + MaybeSendSync {
         None
     }
 
+    /// Downcasts to the Metal backend, if applicable.
+    #[cfg(feature = "metal")]
+    fn as_metal(&self) -> Option<&Metal> {
+        None
+    }
+
     /*
      * Module/function loading.
      */
@@ -303,6 +314,17 @@ pub trait Encoder<B: Backend> {
         target_offset: usize,
         copy_len: usize,
     ) -> Result<(), B::Error>;
+
+    /// Inserts a buffer-scope memory barrier into the active compute pass.
+    ///
+    /// Prefer the inherent [`GpuPass::memory_barrier`] method when working
+    /// with the type-erased backend; this trait method exists for backends
+    /// that implement [`Encoder`] directly. Backends that auto-insert
+    /// barriers between dispatches (e.g. WebGPU/wgpu) implement this as a
+    /// no-op. Backends that do *not* (e.g. Metal with
+    /// `MTLDispatchType::Concurrent`) emit a real barrier so subsequent
+    /// dispatches in the same pass see writes from previous dispatches.
+    fn memory_barrier(&mut self, _pass: &mut B::Pass) {}
 }
 
 /// An in-progress compute dispatch that collects bindings and launches kernels.

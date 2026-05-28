@@ -13,6 +13,7 @@ derive = ["khal-derive"]
 webgpu = ["khal-derive?/webgpu"]
 cpu = ["khal-derive?/cpu"]
 cuda = ["dep:cudarc", "khal-derive?/cuda"]
+metal = ["dep:metal", "dep:naga", "khal-derive?/webgpu"]
 push_constants = []
 subgroup_ops = []
 
@@ -35,3 +36,7 @@ bitflags = "2"
 
 # For test_shader_compilation
 paste = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = { version = "0.32", optional = true }
+naga = { version = "29", optional = true, features = ["spv-in", "msl-out"] }

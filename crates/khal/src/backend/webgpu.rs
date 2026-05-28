@@ -22,6 +22,17 @@ use wgpu::{
     PollError, Queue, ShaderModule, ShaderRuntimeChecks, ShaderStages,
 };
 
+/// Runtime checks used for `create_shader_module_trusted`.
+///
+/// NOTE: we keep force_loop_boinding on to avoid what appears to be miscompilation of the
+///       multibody kernels on some platforms (Windows native + Nvidia gpu).
+fn shader_runtime_checks() -> ShaderRuntimeChecks {
+    ShaderRuntimeChecks {
+        force_loop_bounding: true,
+        ..ShaderRuntimeChecks::unchecked()
+    }
+}
+
 /// A WebGPU buffer slice that tracks its byte length for safe reinterpretation.
 #[derive(Clone, Copy)]
 pub struct WebGpuBufferSlice<'a> {
@@ -221,7 +232,7 @@ impl WebGpu {
                     label: None,
                     source,
                 },
-                ShaderRuntimeChecks::unchecked(),
+                shader_runtime_checks(),
             )
         };
         Ok(shader_module)
@@ -322,7 +333,7 @@ impl Backend for WebGpu {
                     label: None,
                     source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(&data)),
                 },
-                ShaderRuntimeChecks::unchecked(),
+                shader_runtime_checks(),
             )
         };
 
