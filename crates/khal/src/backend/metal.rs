@@ -18,8 +18,8 @@ use bytemuck::{AnyBitPattern, NoUninit};
 use metal::objc::runtime::Object;
 use metal::objc::{msg_send, sel, sel_impl};
 use metal::{
-    Buffer as MtlBuffer, CommandBuffer, CommandQueue, ComputeCommandEncoder,
-    ComputePassDescriptor, ComputePipelineDescriptor, ComputePipelineState, CounterSampleBuffer,
+    Buffer as MtlBuffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePassDescriptor,
+    ComputePipelineDescriptor, ComputePipelineState, CounterSampleBuffer,
     CounterSampleBufferDescriptor, CounterSet, Device, Library, MTLCounterSamplingPoint,
     MTLDispatchType, MTLResourceOptions, MTLSize, MTLStorageMode, NSRange, NSUInteger,
 };
@@ -737,8 +737,11 @@ impl Backend for Metal {
             // MTLBuffer of length 0 isn't allowed; allocate a single byte placeholder.
             self.device.new_buffer(1, resource_options(usage))
         } else {
-            self.device
-                .new_buffer_with_data(bytes.as_ptr() as _, byte_len as NSUInteger, resource_options(usage))
+            self.device.new_buffer_with_data(
+                bytes.as_ptr() as _,
+                byte_len as NSUInteger,
+                resource_options(usage),
+            )
         };
         Ok(MetalBuffer {
             inner,
@@ -990,7 +993,9 @@ impl<'a> Dispatch<'a, Metal> for MetalDispatch<'a> {
                     .args
                     .iter()
                     .find(|(b, _, _, _)| b.space == *group && b.index == *binding);
-                let byte_len = entry.map(|(_, _, _, byte_len)| *byte_len as u32).unwrap_or(0);
+                let byte_len = entry
+                    .map(|(_, _, _, byte_len)| *byte_len as u32)
+                    .unwrap_or(0);
                 sizes.push(byte_len);
             }
             if !sizes.is_empty() {
@@ -1140,7 +1145,9 @@ fn needs_array_length(ty: naga::Handle<naga::Type>, types: &naga::UniqueArena<na
 fn layouts_from_module(module: &naga::Module) -> BindGroupLayoutInfo {
     let mut groups: Vec<Vec<ShaderBinding>> = Vec::new();
     for (_, var) in module.global_variables.iter() {
-        let Some(binding) = &var.binding else { continue };
+        let Some(binding) = &var.binding else {
+            continue;
+        };
         let descriptor_type = match var.space {
             naga::AddressSpace::Uniform => DescriptorType::Uniform,
             naga::AddressSpace::Storage { access } => DescriptorType::Storage {

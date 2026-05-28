@@ -20,16 +20,14 @@
 /// Call from `build.rs`:
 ///
 /// ```no_run
-/// fn main() {
-///     khal_std::build_script::setup_shader_crate_build();
-/// }
+/// khal_std::build_script::setup_shader_crate_build();
 /// ```
 ///
 /// The shader crate must list `khal-std` as a `[build-dependencies]` entry
 /// (in addition to its regular `[dependencies]` use).
 pub fn setup_shader_crate_build() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR not set by cargo");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set by cargo");
     println!("cargo::metadata=manifest_dir={manifest_dir}");
     println!("cargo:rerun-if-changed=build.rs");
 

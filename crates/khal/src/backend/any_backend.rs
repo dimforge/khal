@@ -8,10 +8,9 @@ use crate::backend::cuda::{
 };
 #[cfg(feature = "metal")]
 use crate::backend::metal::{
-    Metal, MetalBackendError, MetalBuffer, MetalBufferSlice,
-    MetalDispatch as MetalDispatchInner, MetalEncoder as MetalEncoderInner,
-    MetalFunction as MetalFunctionInner, MetalModule as MetalModuleInner,
-    MetalPass as MetalPassInner, MetalTimestamps,
+    Metal, MetalBackendError, MetalBuffer, MetalBufferSlice, MetalDispatch as MetalDispatchInner,
+    MetalEncoder as MetalEncoderInner, MetalFunction as MetalFunctionInner,
+    MetalModule as MetalModuleInner, MetalPass as MetalPassInner, MetalTimestamps,
 };
 #[cfg(feature = "webgpu")]
 use crate::backend::webgpu::CommandEncoderExt;
@@ -864,14 +863,14 @@ impl Backend for GpuBackend {
                 )?))
             }
             #[cfg(feature = "metal")]
-            (Self::Metal(backend), GpuModule::Metal(module)) => {
-                Ok(InnerGpuFunction::Metal(backend.load_function_with_layouts(
+            (Self::Metal(backend), GpuModule::Metal(module)) => Ok(InnerGpuFunction::Metal(
+                backend.load_function_with_layouts(
                     module,
                     entry_point,
                     push_constant_size,
                     layouts,
-                )?))
-            }
+                )?,
+            )),
             #[cfg(feature = "cpu")]
             (Self::Cpu, GpuModule::Noop) => Ok(InnerGpuFunction::Noop),
             _ => panic!("Invalid backend/module type pair"),
@@ -1342,7 +1341,12 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSlice<'_, T> {
             }
             #[cfg(feature = "metal")]
             (GpuBufferSlice::Metal(slice), GpuDispatch::Metal(dispatch)) => {
-                dispatch.set_arg(binding, slice.buffer(), slice.byte_offset(), slice.byte_len());
+                dispatch.set_arg(
+                    binding,
+                    slice.buffer(),
+                    slice.byte_offset(),
+                    slice.byte_len(),
+                );
                 Ok(())
             }
             #[cfg(feature = "cpu")]
@@ -1374,7 +1378,12 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSliceMut<'_, T> {
             }
             #[cfg(feature = "metal")]
             (GpuBufferSliceMut::Metal(slice), GpuDispatch::Metal(dispatch)) => {
-                dispatch.set_arg(binding, slice.buffer(), slice.byte_offset(), slice.byte_len());
+                dispatch.set_arg(
+                    binding,
+                    slice.buffer(),
+                    slice.byte_offset(),
+                    slice.byte_len(),
+                );
                 Ok(())
             }
             #[cfg(feature = "cpu")]
