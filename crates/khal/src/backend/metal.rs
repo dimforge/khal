@@ -229,7 +229,8 @@ pub struct MetalFunction {
     /// order). At dispatch we call `setThreadgroupMemoryLength:atIndex:`
     /// for each entry.
     pub(crate) threadgroup_sizes: Arc<Vec<u32>>,
-    /// Workgroup size declared in the shader. Used for indirect dispatch.
+    /// Workgroup size declared in the shader. Reserved for indirect dispatch.
+    #[allow(dead_code)]
     pub(crate) workgroup_size: [u32; 3],
 }
 
@@ -575,10 +576,10 @@ impl Backend for Metal {
         // 0, 1, 2... in declaration order — matching this Vec's indices.
         let mut threadgroup_sizes: Vec<u32> = Vec::new();
         for (_, var) in module.naga.global_variables.iter() {
-            if needs_array_length(var.ty, &module.naga.types) {
-                if let Some(b) = &var.binding {
-                    sizes_bindings.push((b.group, b.binding));
-                }
+            if needs_array_length(var.ty, &module.naga.types)
+                && let Some(b) = &var.binding
+            {
+                sizes_bindings.push((b.group, b.binding));
             }
             if matches!(var.space, naga::AddressSpace::WorkGroup) {
                 let layout = module.layouter[var.ty];
@@ -636,7 +637,7 @@ impl Backend for Metal {
             .zip(module.naga.entry_points.iter())
             .find_map(|(name_result, ep)| {
                 if ep.name == entry_point {
-                    name_result.as_ref().ok().map(|n| n.clone())
+                    name_result.as_ref().ok().cloned()
                 } else {
                     None
                 }
@@ -1120,14 +1121,13 @@ fn resource_options(usage: BufferUsages) -> MTLResourceOptions {
 fn needs_array_length(ty: naga::Handle<naga::Type>, types: &naga::UniqueArena<naga::Type>) -> bool {
     match types[ty].inner {
         naga::TypeInner::Struct { ref members, .. } => {
-            if let Some(member) = members.last() {
-                if let naga::TypeInner::Array {
+            if let Some(member) = members.last()
+                && let naga::TypeInner::Array {
                     size: naga::ArraySize::Dynamic,
                     ..
                 } = types[member.ty].inner
-                {
-                    return true;
-                }
+            {
+                return true;
             }
             false
         }

@@ -12,13 +12,13 @@ cpu-parallel = ["cpu", "khal-example-shaders/cpu-parallel"]
 cuda = ["khal/cuda", "khal-builder/cuda", "khal-example-shaders/cuda"]
 
 [dependencies]
-khal = { version = "0.1.0", path = "../khal", features = ["derive"] }
+khal = { version = "0.2.0", path = "../khal", features = ["derive"] }
 include_dir = "0.7"
 async-std = { version = "1", features = ["attributes"] }
 khal-example-shaders = { path = "../khal-example-shaders" }
 
 [build-dependencies]
-khal-builder = { version = "0.1.0", path = "../khal-builder" }
+khal-builder = { version = "0.2.0", path = "../khal-builder" }
 # Listed as a build-dep (in addition to the regular `[dependencies]` entry
 # above) so cargo runs the shader crate's `build.rs` before ours and
 # forwards its `DEP_KHAL_EXAMPLE_SHADERS_MANIFEST_DIR` env var to our
