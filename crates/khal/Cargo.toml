@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 smallvec = "1"
 include_dir = "0.7"
 
-khal-derive = { version = "0.1", path = "../khal-derive", optional = true }
+khal-derive = { version = "0.2", path = "../khal-derive", optional = true }
 cudarc = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
@@ -40,3 +40,9 @@ paste = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = { version = "0.32", optional = true }
 naga = { version = "29", optional = true, features = ["spv-in", "msl-out"] }
+
+[lints.rust]
+# The `objc` crate's `msg_send!` macro (used by the Metal backend) expands to
+# a `cfg(feature = "cargo-clippy")` check, which trips `unexpected_cfgs` under
+# clippy. Declare it as an expected cfg so it doesn't warn.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
