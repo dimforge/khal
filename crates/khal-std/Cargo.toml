@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [features]
+default = ["rust-cuda"]
 cpu = ["corosensei"]
 cpu-parallel = ["cpu", "rayon"]
 cuda = []
@@ -24,6 +25,21 @@ cuda = []
 # for deploying to the web.
 unsafe_remove_boundchecks = []
 
+# --- nvptx64 device backend selection ---
+# `rust-cuda` (default): compile device code with Rust-CUDA's rustc_codegen_nvvm,
+# pulling `cuda_std` for thread/grid intrinsics and `GpuFloat` math.
+# `cuda-oxide`: compile device code with the cuda-oxide PTX backend instead.
+# cuda_std does not build under cuda-oxide's `-Zbuild-std`, so this path uses
+# khal_std's own `llvm.nvvm.*` intrinsic declarations (lowered by cuda-oxide)
+# and a libm-backed `Float`. Build shader crates with
+# `default-features = false, features = ["cuda-oxide", ...]`.
+rust-cuda = ["dep:cuda_std"]
+# NOTE: the cuda-oxide backend (device-only nvptx build) also needs a
+# `cuda-device` dependency, but that crate lives in the cuda-oxide tree and is
+# only present on the build box; it is added there. This manifest keeps the
+# feature host-buildable everywhere else.
+cuda-oxide = ["dep:num-traits"]
+
 [dependencies]
 glamx = { version = "0.3", default-features = false, features = ["nostd-libm", "bytemuck", "u32", "i32", "f64"] }
 rayon = { version = "1", optional = true }
@@ -38,5 +54,11 @@ workspace = true
 spirv-std = "0.10.0-alpha.1"
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
-# Fixes the UVec3::element_product bug
-cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up" }
+# Fixes the UVec3::element_product bug. Optional: only the `rust-cuda` backend
+# (rustc_codegen_nvvm) uses it; the `cuda-oxide` backend declares its own
+# intrinsics instead (cuda_std does not build under `-Zbuild-std`).
+cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up", optional = true }
+# `Float` for the cuda-oxide backend (libm software math, no_std).
+num-traits = { version = "0.2", default-features = false, features = ["libm"], optional = true }
+# (cuda-oxide device build only, added on the build box:)
+# cuda-device = { path = ".../cuda-oxide/crates/cuda-device", optional = true }

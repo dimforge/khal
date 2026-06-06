@@ -121,6 +121,7 @@ pub struct CudaModule {
 #[derive(Clone)]
 pub struct CudaFunction {
     pub(crate) func: driver::CudaFunction,
+    pub(crate) name: String,
 }
 
 // ── Encoder / Pass ─────────────────────────────────────────────────────
@@ -319,7 +320,7 @@ impl Backend for Cuda {
         _push_constant_size: u32,
     ) -> Result<Self::Function, Self::Error> {
         let func = module.inner.load_function(entry_point)?;
-        Ok(CudaFunction { func })
+        Ok(CudaFunction { func, name: entry_point.to_string() })
     }
 
     fn load_function_with_layouts(
@@ -607,8 +608,24 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
             shared_mem_bytes: 0,
         };
 
+        let trace = std::env::var_os("KHAL_CUDA_TRACE").is_some();
+        if trace {
+            eprintln!(
+                "[khal-cuda launch] {} nargs={} grid={:?} block={:?}",
+                self.function.name, param_values.len(), grid_dim, block_dim
+            );
+        }
         unsafe {
             builder.launch(cfg)?;
+        }
+        if trace {
+            match self.stream.synchronize() {
+                Ok(()) => eprintln!("[khal-cuda   ok  ] {}", self.function.name),
+                Err(e) => {
+                    eprintln!("[khal-cuda  FAIL ] {} -> {:?}", self.function.name, e);
+                    return Err(e.into());
+                }
+            }
         }
 
         Ok(())
