@@ -319,7 +319,13 @@ impl Backend for Cuda {
         entry_point: &str,
         _push_constant_size: u32,
     ) -> Result<Self::Function, Self::Error> {
-        let func = module.inner.load_function(entry_point)?;
+        let func = match module.inner.load_function(entry_point) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[khal-cuda load_function FAIL] {} -> {:?}", entry_point, e);
+                return Err(e.into());
+            }
+        };
         Ok(CudaFunction { func, name: entry_point.to_string() })
     }
 
