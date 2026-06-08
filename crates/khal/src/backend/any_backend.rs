@@ -1632,7 +1632,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBuffer<T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBuffer::Cuda(buffer), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, buffer.device_ptr_raw(), buffer.byte_len());
+                // cuda-oxide `&[T]` slice ABI wants an ELEMENT count, but byte_len is bytes;
+                // push element count so kernel `slice.len()` is correct (off-by-size_of
+                // otherwise -> OOB reads, e.g. gpu_init_sort_dispatch / lbvh). Arrays,
+                // scalars and uniforms ignore this value, so they are unaffected.
+                dispatch.set_arg(binding, buffer.device_ptr_raw(), buffer.byte_len() / std::mem::size_of::<T>() as u64);
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1664,7 +1668,7 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSlice<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSlice::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len / std::mem::size_of::<T>() as u64);
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1701,7 +1705,7 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSliceMut<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSliceMut::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len / std::mem::size_of::<T>() as u64);
                 Ok(())
             }
             #[cfg(feature = "metal")]
