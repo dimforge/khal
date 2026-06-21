@@ -679,6 +679,15 @@ impl CpuTimestamps {
             entries: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    /// No-op: CPU pass timings are collected synchronously on pass drop, so
+    /// results are available as soon as the step returns.
+    fn request_read(&mut self) {}
+
+    /// Always ready: returns the timings collected so far this frame.
+    fn try_take(&mut self) -> Option<Vec<GpuTimestamp>> {
+        Some(self.entries.lock().unwrap().clone())
+    }
 }
 
 /// Backend-agnostic GPU timestamp manager for profiling compute passes.
@@ -750,6 +759,47 @@ impl GpuTimestamps {
         }
     }
 
+    /// Initiates a non-blocking readback of the timed passes.
+    ///
+    /// Call once per frame after the passes have been submitted (and, on the
+    /// wgpu backend, after [`resolve`](Self::resolve)). Returns immediately
+    /// without blocking on the GPU. Poll for completion with
+    /// [`try_take`](Self::try_take).
+    pub fn request_read(&mut self, backend: &GpuBackend) {
+        match (self, backend) {
+            #[cfg(feature = "webgpu")]
+            (GpuTimestamps::WebGpu(ts), GpuBackend::WebGpu(_)) => ts.request_read(),
+            #[cfg(feature = "cuda")]
+            (GpuTimestamps::Cuda(ts), _) => ts.request_read(),
+            #[cfg(feature = "metal")]
+            (GpuTimestamps::Metal(ts), GpuBackend::Metal(metal)) => ts.request_read(metal),
+            #[cfg(feature = "cpu")]
+            (GpuTimestamps::Cpu(ts), _) => ts.request_read(),
+            _ => {}
+        }
+    }
+
+    /// Non-blocking poll of a readback started by [`request_read`](Self::request_read).
+    ///
+    /// Returns `Some(results)` once the GPU work that produced the timestamps
+    /// has completed; `None` while it is still in flight. This drives the
+    /// backend with a non-blocking [`poll`](Backend::poll), so completion
+    /// progresses as long as it is called periodically (e.g. once per frame).
+    pub fn try_take(&mut self, backend: &GpuBackend) -> Option<Vec<GpuTimestamp>> {
+        backend.poll();
+        match self {
+            #[cfg(feature = "webgpu")]
+            GpuTimestamps::WebGpu(ts) => ts.try_take(),
+            #[cfg(feature = "cuda")]
+            GpuTimestamps::Cuda(ts) => ts.try_take(),
+            #[cfg(feature = "metal")]
+            GpuTimestamps::Metal(ts) => ts.try_take(),
+            #[cfg(feature = "cpu")]
+            GpuTimestamps::Cpu(ts) => ts.try_take(),
+            GpuTimestamps::Noop => Some(Vec::new()),
+        }
+    }
+
     /// Reads back timestamp results after GPU synchronization.
     ///
     /// Returns per-pass durations in milliseconds. Call after `backend.synchronize()`.
@@ -764,6 +814,214 @@ impl GpuTimestamps {
             #[cfg(feature = "cpu")]
             (GpuTimestamps::Cpu(ts), _) => Ok(ts.entries.lock().unwrap().clone()),
             _ => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Tracks completion of a [`GpuReadback`]'s in-flight copy.
+enum ReadbackState {
+    /// No readback in flight.
+    Idle,
+    /// The staging copy is host-visible as soon as the submission is processed
+    /// (CPU backend — synchronous wrt submit).
+    Ready,
+    /// A wgpu buffer map is in flight; the channel fires once the GPU has
+    /// finished and the staging buffer is mapped.
+    #[cfg(feature = "webgpu")]
+    WebGpu(async_channel::Receiver<Result<(), wgpu::BufferAsyncError>>),
+    /// A Metal completion flag, flipped by the fence's command-buffer completion
+    /// handler once the copy has landed in the shared staging buffer.
+    #[cfg(feature = "metal")]
+    Metal(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
+/// Non-blocking GPU→CPU readback of a small buffer region.
+///
+/// Makes it easier to stage non-blocking readback to eventually access data
+/// transfered from the device.
+/// - [`request`](Self::request) copies the sources into an internal staging buffer
+/// and starts an asynchronous readback that returns immediately.
+/// - [`try_take`](Self::try_take) polls for completion and copies the data out
+/// once the GPU has actually finished.
+///
+/// Reuse one instance across frames to pipeline the readback.
+pub struct GpuReadback<T: DeviceValue + AnyBitPattern> {
+    staging: GpuBuffer<T>,
+    len: usize,
+    state: ReadbackState,
+}
+
+// SAFETY: mirrors `MetalTimestamps` — the only non-`Send`/`Sync` payload is a
+// Metal command buffer, whose underlying Objective-C object Apple documents as
+// thread-safe. The wgpu channel and `GpuBuffer` are already `Send`/`Sync`.
+unsafe impl<T: DeviceValue + AnyBitPattern> Send for GpuReadback<T> {}
+unsafe impl<T: DeviceValue + AnyBitPattern> Sync for GpuReadback<T> {}
+
+impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
+    /// Creates a readback with an internal staging buffer of `len` elements.
+    pub fn new(backend: &GpuBackend, len: usize) -> Result<Self, GpuBackendError> {
+        let staging =
+            backend.uninit_buffer::<T>(len, BufferUsages::MAP_READ | BufferUsages::COPY_DST)?;
+        Ok(Self {
+            staging,
+            len,
+            state: ReadbackState::Idle,
+        })
+    }
+
+    /// Whether no readback is currently in flight (ready to [`request`](Self::request)).
+    ///
+    /// Use this to pipeline a single-slot readback: only issue a new request
+    /// once the previous one has been consumed by [`try_take`](Self::try_take),
+    /// otherwise a freshly-requested copy is never old enough to have completed.
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, ReadbackState::Idle)
+    }
+
+    /// Number of elements the staging buffer holds.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the staging buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Copies the first `len` elements of `source` (from `source_offset`) into
+    /// the staging buffer and starts a non-blocking readback. Use this for bulk
+    /// readback of a whole buffer; see [`request`](Self::request) for gathering
+    /// individual scalars from several sources.
+    pub fn request_copy(
+        &mut self,
+        backend: &GpuBackend,
+        source: &GpuBuffer<T>,
+        source_offset: usize,
+    ) -> Result<(), GpuBackendError> {
+        let mut encoder = backend.begin_encoding();
+        encoder.copy_buffer_to_buffer(source, source_offset, &mut self.staging, 0, self.len)?;
+        backend.submit(encoder)?;
+        self.state = self.begin_completion(backend);
+        Ok(())
+    }
+
+    /// Copies each `(source, source_offset)` into the staging buffer (one
+    /// element per source, in order) and starts a non-blocking readback. A
+    /// previously requested-but-untaken readback is discarded.
+    pub fn request(
+        &mut self,
+        backend: &GpuBackend,
+        sources: &[(&GpuBuffer<T>, usize)],
+    ) -> Result<(), GpuBackendError> {
+        let mut encoder = backend.begin_encoding();
+        for (i, (source, source_offset)) in sources.iter().enumerate() {
+            encoder.copy_buffer_to_buffer(source, *source_offset, &mut self.staging, i, 1)?;
+        }
+        backend.submit(encoder)?;
+        self.state = self.begin_completion(backend);
+        Ok(())
+    }
+
+    /// Sets up backend-specific completion tracking after the copy is submitted.
+    fn begin_completion(&self, backend: &GpuBackend) -> ReadbackState {
+        match (&self.staging, backend) {
+            #[cfg(feature = "webgpu")]
+            (GpuBuffer::WebGpu(buffer), _) => {
+                let (sender, receiver) = async_channel::bounded(1);
+                buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |v| {
+                        let _ = sender.force_send(v);
+                    });
+                ReadbackState::WebGpu(receiver)
+            }
+            #[cfg(feature = "metal")]
+            (GpuBuffer::Metal(_), GpuBackend::Metal(metal)) => {
+                ReadbackState::Metal(metal.commit_completion())
+            }
+            _ => ReadbackState::Ready,
+        }
+    }
+
+    /// Non-blocking poll of a readback started by [`request`](Self::request).
+    ///
+    /// Returns `true` and fills `out` once the data is ready; returns `false`
+    /// (leaving `out` untouched) while the GPU is still running. Drives the
+    /// backend with a non-blocking [`poll`](Backend::poll), so completion
+    /// progresses as long as this is called periodically.
+    pub fn try_take(&mut self, backend: &GpuBackend, out: &mut [T]) -> bool {
+        backend.poll();
+        match std::mem::replace(&mut self.state, ReadbackState::Idle) {
+            ReadbackState::Idle => false,
+            ReadbackState::Ready => {
+                self.read_staging_into(out);
+                true
+            }
+            #[cfg(feature = "webgpu")]
+            ReadbackState::WebGpu(rx) => match rx.try_recv() {
+                Ok(Ok(())) => {
+                    self.read_staging_into(out);
+                    true
+                }
+                // Map failed / channel closed: stop waiting, leave `out` as-is.
+                Ok(Err(_)) | Err(async_channel::TryRecvError::Closed) => true,
+                Err(async_channel::TryRecvError::Empty) => {
+                    self.state = ReadbackState::WebGpu(rx);
+                    false
+                }
+            },
+            #[cfg(feature = "metal")]
+            ReadbackState::Metal(done) => {
+                if done.load(std::sync::atomic::Ordering::Acquire) {
+                    self.read_staging_into(out);
+                    true
+                } else {
+                    self.state = ReadbackState::Metal(done);
+                    false
+                }
+            }
+        }
+    }
+
+    /// Copies the host-visible staging contents into `out` (up to `out.len()`).
+    fn read_staging_into(&self, out: &mut [T]) {
+        let n = out.len().min(self.len);
+        if n == 0 {
+            return;
+        }
+        match &self.staging {
+            #[cfg(feature = "cpu")]
+            GpuBuffer::Cpu(data) => out[..n].copy_from_slice(&data[..n]),
+            #[cfg(feature = "metal")]
+            GpuBuffer::Metal(buffer) => {
+                // SAFETY: shared-storage buffer; contents() is host-visible and
+                // valid, and `T: AnyBitPattern` makes any bit pattern a valid T.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.raw().contents() as *const T,
+                        out.as_mut_ptr(),
+                        n,
+                    );
+                }
+            }
+            #[cfg(feature = "webgpu")]
+            GpuBuffer::WebGpu(buffer) => {
+                let slice = buffer.slice(..);
+                let data = slice.get_mapped_range();
+                // SAFETY: T: AnyBitPattern; copy at most the smaller of the
+                // mapped range and the destination.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        out.as_mut_ptr() as *mut u8,
+                        data.len().min(n * std::mem::size_of::<T>()),
+                    );
+                }
+                drop(data);
+                buffer.unmap();
+            }
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 }
@@ -1021,6 +1279,19 @@ impl Backend for GpuBackend {
             GpuBackend::Metal(backend) => Ok(backend.synchronize()?),
             #[cfg(feature = "cpu")]
             GpuBackend::Cpu => Ok(()),
+        }
+    }
+
+    fn poll(&self) {
+        match self {
+            #[cfg(feature = "webgpu")]
+            GpuBackend::WebGpu(backend) => backend.poll(),
+            #[cfg(feature = "cuda")]
+            GpuBackend::Cuda(backend) => backend.poll(),
+            #[cfg(feature = "metal")]
+            GpuBackend::Metal(backend) => backend.poll(),
+            #[cfg(feature = "cpu")]
+            GpuBackend::Cpu => {}
         }
     }
 

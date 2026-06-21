@@ -219,6 +219,20 @@ impl CudaTimestamps {
         self.pending.lock().unwrap().clear();
     }
 
+    /// Initiates a non-blocking readback. No-op for CUDA: completion is probed
+    /// directly via the recorded events in [`try_take`](Self::try_take).
+    pub fn request_read(&mut self) {}
+
+    /// Non-blocking poll of the recorded timestamps.
+    ///
+    /// Returns `Some(results)` once every event has completed, or `None` while
+    /// any is still pending. `event::elapsed` reports `CUDA_ERROR_NOT_READY`
+    /// (an `Err`) until both events of a pair have been recorded by the GPU, so
+    /// a successful read doubles as the readiness probe.
+    pub fn try_take(&mut self) -> Option<Vec<super::GpuTimestamp>> {
+        self.read().ok()
+    }
+
     /// Reads timestamp results. Must be called after stream synchronization.
     pub fn read(&self) -> Result<Vec<super::GpuTimestamp>, CudaBackendError> {
         let pending = self.pending.lock().unwrap();
