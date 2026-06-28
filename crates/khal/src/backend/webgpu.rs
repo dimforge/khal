@@ -28,7 +28,7 @@ use wgpu::{
 ///       multibody kernels on some platforms (Windows native + Nvidia gpu).
 fn shader_runtime_checks() -> ShaderRuntimeChecks {
     ShaderRuntimeChecks {
-        force_loop_bounding: false,
+        force_loop_bounding: true,
         ..ShaderRuntimeChecks::unchecked()
     }
 }
