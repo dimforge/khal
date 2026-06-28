@@ -28,7 +28,7 @@ use wgpu::{
 ///       multibody kernels on some platforms (Windows native + Nvidia gpu).
 fn shader_runtime_checks() -> ShaderRuntimeChecks {
     ShaderRuntimeChecks {
-        force_loop_bounding: true,
+        force_loop_bounding: false,
         ..ShaderRuntimeChecks::unchecked()
     }
 }
@@ -38,6 +38,17 @@ fn shader_runtime_checks() -> ShaderRuntimeChecks {
 pub struct WebGpuBufferSlice<'a> {
     pub(crate) inner: BufferSlice<'a>,
     pub(crate) byte_len: u64,
+}
+
+impl<'a> WebGpuBufferSlice<'a> {
+    /// Wraps a foreign `wgpu::Buffer` (e.g. one owned by another library sharing
+    /// this device) as a buffer slice spanning its whole range.
+    pub fn from_wgpu(buffer: &'a wgpu::Buffer) -> Self {
+        Self {
+            inner: buffer.slice(..),
+            byte_len: buffer.size(),
+        }
+    }
 }
 
 impl<'a> From<WebGpuBufferSlice<'a>> for wgpu::BindingResource<'a> {
@@ -183,6 +194,31 @@ impl WebGpu {
             spirv_passthrough_enabled,
             timestamp_supported,
         })
+    }
+
+    /// Builds a WebGPU backend on top of an already-created wgpu device/queue,
+    /// instead of creating its own (as [`Self::new`] does).
+    pub fn from_device(
+        instance: Instance,
+        adapter: Adapter,
+        device: Device,
+        queue: Queue,
+    ) -> Self {
+        let timestamp_supported = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let is_vulkan_backend = adapter.get_info().backend == wgpu::Backend::Vulkan;
+        let spirv_passthrough_enabled = is_vulkan_backend
+            && device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS);
+
+        Self {
+            _instance: instance,
+            _adapter: adapter,
+            device,
+            queue,
+            force_buffer_copy_src: false,
+            hacks: vec![],
+            spirv_passthrough_enabled,
+            timestamp_supported,
+        }
     }
 
     /// Adds a regex-based text replacement to apply to WGSL source before compilation.
@@ -966,6 +1002,13 @@ impl WebGpuTimestamps {
         self.next_index = 0;
         self.labels.clear();
         self.read_state = TimestampReadState::Idle;
+    }
+
+    /// Whether no non-blocking readback is in flight (safe to record + resolve a
+    /// new frame). While a [`request_read`](Self::request_read) is pending, the
+    /// staging buffer is mapped, so resolving into it again would be invalid.
+    pub fn is_idle(&self) -> bool {
+        matches!(self.read_state, TimestampReadState::Idle)
     }
 
     /// Resolves timestamp queries to a buffer and copies to staging for readback.

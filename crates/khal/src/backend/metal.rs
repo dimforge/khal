@@ -398,6 +398,11 @@ impl MetalTimestamps {
         self.done = None;
     }
 
+    /// Whether no non-blocking readback is in flight (safe to record a new frame).
+    pub fn is_idle(&self) -> bool {
+        self.done.is_none()
+    }
+
     /// Initiates a non-blocking readback of the sampled timestamps.
     ///
     /// Call once after the frame's passes have been submitted. Commits an empty

@@ -219,6 +219,12 @@ impl CudaTimestamps {
         self.pending.lock().unwrap().clear();
     }
 
+    /// Whether no recorded-but-untaken timestamps remain (safe to record a new
+    /// frame). False while events from a previous frame await [`try_take`].
+    pub fn is_idle(&self) -> bool {
+        self.pending.lock().unwrap().is_empty()
+    }
+
     /// Initiates a non-blocking readback. No-op for CUDA: completion is probed
     /// directly via the recorded events in [`try_take`](Self::try_take).
     pub fn request_read(&mut self) {}

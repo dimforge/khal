@@ -241,6 +241,16 @@ pub enum GpuBufferSlice<'a, T: DeviceValue> {
 }
 
 impl<'a, T: DeviceValue> GpuBufferSlice<'a, T> {
+    /// Wraps a foreign `wgpu::Buffer` (owned by another library that shares this
+    /// backend's device) as a read-only GPU buffer slice over its whole range.
+    ///
+    /// The element type `T` is purely a compile-time tag; callers are responsible
+    /// for ensuring the buffer's byte layout matches `T`.
+    #[cfg(feature = "webgpu")]
+    pub fn from_wgpu(buffer: &'a wgpu::Buffer) -> Self {
+        Self::WebGpu(crate::backend::webgpu::WebGpuBufferSlice::from_wgpu(buffer))
+    }
+
     /// Returns the underlying CPU slice. Panics if this is not a CPU buffer slice.
     #[cfg(feature = "cpu")]
     pub fn unwrap_slice(&self) -> &[T] {
@@ -424,6 +434,17 @@ impl<'a, T: DeviceValue + bytemuck::Pod> GpuBufferSliceMut<'a, T> {
 }
 
 impl<'a, T: DeviceValue> GpuBufferSliceMut<'a, T> {
+    /// Wraps a foreign `wgpu::Buffer` (owned by another library that shares this
+    /// backend's device) as a mutable storage GPU buffer slice over its whole
+    /// range, suitable for passing to a kernel `.call(...)` as a mutable binding.
+    ///
+    /// The element type `T` is purely a compile-time tag; callers are responsible
+    /// for ensuring the buffer's byte layout matches `T`.
+    #[cfg(feature = "webgpu")]
+    pub fn from_wgpu(buffer: &'a wgpu::Buffer) -> Self {
+        Self::WebGpu(crate::backend::webgpu::WebGpuBufferSlice::from_wgpu(buffer))
+    }
+
     /// Returns the underlying mutable CPU slice. Panics if this is not a CPU buffer slice.
     #[cfg(feature = "cpu")]
     pub fn unwrap_slice(&mut self) -> &mut [T] {
