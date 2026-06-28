@@ -709,6 +709,12 @@ impl CpuTimestamps {
     fn try_take(&mut self) -> Option<Vec<GpuTimestamp>> {
         Some(self.entries.lock().unwrap().clone())
     }
+
+    /// Always idle: CPU readback is synchronous, so there's never an in-flight
+    /// readback to wait on before recording a new frame.
+    fn is_idle(&self) -> bool {
+        true
+    }
 }
 
 /// Backend-agnostic GPU timestamp manager for profiling compute passes.
@@ -751,6 +757,25 @@ impl GpuTimestamps {
     /// Whether this timestamp manager is active (not Noop).
     pub fn is_enabled(&self) -> bool {
         !matches!(self, GpuTimestamps::Noop)
+    }
+
+    /// Whether no non-blocking readback is in flight, so a new frame can be
+    /// recorded and resolved. Use this to gate recording: while a
+    /// [`request_read`](Self::request_read) is pending, recording another frame
+    /// would clobber the readback in progress (and, on wgpu, resolve into a
+    /// mapped staging buffer). Mirrors [`GpuReadback::is_idle`].
+    pub fn is_idle(&self) -> bool {
+        match self {
+            #[cfg(feature = "webgpu")]
+            GpuTimestamps::WebGpu(ts) => ts.is_idle(),
+            #[cfg(feature = "cuda")]
+            GpuTimestamps::Cuda(ts) => ts.is_idle(),
+            #[cfg(feature = "metal")]
+            GpuTimestamps::Metal(ts) => ts.is_idle(),
+            #[cfg(feature = "cpu")]
+            GpuTimestamps::Cpu(ts) => ts.is_idle(),
+            GpuTimestamps::Noop => true,
+        }
     }
 
     /// Resets the timestamp manager for a new frame.
@@ -926,17 +951,29 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
         Ok(())
     }
 
-    /// Copies each `(source, source_offset)` into the staging buffer (one
-    /// element per source, in order) and starts a non-blocking readback. A
-    /// previously requested-but-untaken readback is discarded.
+    /// Gathers several `(source, source_offset, count)` ranges into the staging
+    /// buffer back-to-back (in the given order) and starts a non-blocking
+    /// readback. Each range copies `count` elements from `source[source_offset..]`;
+    /// use `count == 1` to gather individual scalars, or a larger `count` to read
+    /// a whole sub-buffer (e.g. a per-batch count array). The combined element
+    /// count must not exceed the readback's [`len`](Self::len). A previously
+    /// requested-but-untaken readback is discarded.
     pub fn request(
         &mut self,
         backend: &GpuBackend,
-        sources: &[(&GpuBuffer<T>, usize)],
+        sources: &[(&GpuBuffer<T>, usize, usize)],
     ) -> Result<(), GpuBackendError> {
         let mut encoder = backend.begin_encoding();
-        for (i, (source, source_offset)) in sources.iter().enumerate() {
-            encoder.copy_buffer_to_buffer(source, *source_offset, &mut self.staging, i, 1)?;
+        let mut dst_offset = 0;
+        for (source, source_offset, count) in sources.iter() {
+            encoder.copy_buffer_to_buffer(
+                source,
+                *source_offset,
+                &mut self.staging,
+                dst_offset,
+                *count,
+            )?;
+            dst_offset += count;
         }
         backend.submit(encoder)?;
         self.state = self.begin_completion(backend);
