@@ -759,8 +759,20 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
                     format!("{}::{}", module, entry_point)
                 };
 
+                // On wasm/WebGPU, wgpu transpiles the SPIR-V to WGSL via naga and matches
+                // the requested entry point against the generated WGSL function name. naga's
+                // Namer sanitizes identifiers: `::` -> `_`, and additionally appends a
+                // trailing `_` when the name ends in a digit (it reserves that suffix for its
+                // own numeric disambiguation). Mirror both rules so the lookup matches, e.g.
+                // `linalg::reduce::reduce_add_f32` -> `linalg_reduce_reduce_add_f32_`.
                 #[cfg(target_arch = "wasm32")]
-                let full_entry = full_entry.replace("::", "_");
+                let full_entry = {
+                    let mut full_entry = full_entry.replace("::", "_");
+                    if matches!(full_entry.bytes().last(), Some(b'0'..=b'9')) {
+                        full_entry.push('_');
+                    }
+                    full_entry
+                };
 
                 Self::from_bytes(backend, file.contents(), &full_entry)
             }
