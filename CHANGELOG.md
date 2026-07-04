@@ -2,7 +2,7 @@
 
 _Disclaimer: this changelog is updated using generative AI, but is still verified manually._
 
-## Unreleased
+## v0.2.1
 
 ### Added
 - **Non-blocking GPU→CPU readback.** A new `GpuReadback` type stages a buffer copy and returns immediately: `request`/`request_copy` start the transfer and `try_take` polls for completion (`is_idle` reports whether a readback is in flight). `GpuTimestamps` gained matching `request_read`/`try_take`/`is_idle` for non-blocking timestamp readback. Both are driven by a new `Backend::poll` maintenance method (a non-blocking counterpart to `synchronize`) implemented across the WebGPU, CUDA, Metal, and CPU backends. The `metal` feature now pulls in `block` for command-buffer completion handlers.
