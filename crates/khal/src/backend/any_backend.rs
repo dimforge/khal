@@ -886,9 +886,9 @@ enum ReadbackState {
 /// Makes it easier to stage non-blocking readback to eventually access data
 /// transfered from the device.
 /// - [`request`](Self::request) copies the sources into an internal staging buffer
-/// and starts an asynchronous readback that returns immediately.
+///   and starts an asynchronous readback that returns immediately.
 /// - [`try_take`](Self::try_take) polls for completion and copies the data out
-/// once the GPU has actually finished.
+///   once the GPU has actually finished.
 ///
 /// Reuse one instance across frames to pipeline the readback.
 pub struct GpuReadback<T: DeviceValue + AnyBitPattern> {
@@ -995,6 +995,7 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
             (GpuBuffer::Metal(_), GpuBackend::Metal(metal)) => {
                 ReadbackState::Metal(metal.commit_completion())
             }
+            #[allow(unreachable_patterns)]
             _ => ReadbackState::Ready,
         }
     }
