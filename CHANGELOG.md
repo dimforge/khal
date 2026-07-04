@@ -2,6 +2,18 @@
 
 _Disclaimer: this changelog is updated using generative AI, but is still verified manually._
 
+## Unreleased
+
+### Added
+- **Non-blocking GPU→CPU readback.** A new `GpuReadback` type stages a buffer copy and returns immediately: `request`/`request_copy` start the transfer and `try_take` polls for completion (`is_idle` reports whether a readback is in flight). `GpuTimestamps` gained matching `request_read`/`try_take`/`is_idle` for non-blocking timestamp readback. Both are driven by a new `Backend::poll` maintenance method (a non-blocking counterpart to `synchronize`) implemented across the WebGPU, CUDA, Metal, and CPU backends. The `metal` feature now pulls in `block` for command-buffer completion handlers.
+- `WebGpu::from_device`: build a WebGPU backend on top of an already-created wgpu instance/adapter/device/queue instead of creating its own.
+- `from_wgpu` constructors on `GpuBufferSlice`, `GpuBufferSliceMut`, and `WebGpuBufferSlice` to wrap a foreign `wgpu::Buffer` (owned by another library sharing the device) as a khal buffer slice.
+- `force_cpu_coroutines` option for `#[spirv_bindgen]`: forces the CPU backend to dispatch a kernel through the coroutine scheduler so `barrier_wait()` synchronizes, even for kernels with no `#[spirv(workgroup)]` parameter. Replaces the old dummy-workgroup-parameter hack.
+- The CUDA backend's `load_module_bytes` now accepts a pre-linked CUBIN (detected via the ELF magic) in addition to PTX text, for modules referencing symbols the driver JIT cannot resolve on its own (e.g. libdevice `__nv_*` math).
+
+### Fixed
+- WebGPU entry-point lookup on wasm now mirrors naga's identifier sanitization, which appends a trailing `_` to names ending in a digit, so kernels like `reduce_add_f32` resolve correctly.
+
 ## v0.2.0
 
 ### Added
