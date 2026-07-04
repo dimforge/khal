@@ -344,7 +344,17 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
     //   #[spirv_bindgen(MyName)]
     //   #[spirv_bindgen(spirv_passthrough)]
     //   #[spirv_bindgen(MyName, spirv_passthrough)]
+    //   #[spirv_bindgen(force_cpu_coroutines)]            // force CPU coroutine dispatch
+    //   #[spirv_bindgen(MyName, force_cpu_coroutines)]
     let mut spirv_passthrough = false;
+    // When set, the CPU backend always dispatches this kernel through the
+    // coroutine scheduler (the path that makes `barrier_wait()` actually
+    // synchronize), even when the kernel declares no `#[spirv(workgroup)]`
+    // parameter. Use for kernels that rely on barriers but exchange data through
+    // storage buffers rather than shared memory — otherwise their threads run
+    // sequentially with no-op barriers on the CPU backend. Replaces the old
+    // "dummy `#[spirv(workgroup)] _cpu_marker` parameter" hack.
+    let mut force_cpu_coroutines = false;
     let struct_name: syn::Ident = if attr.is_empty() {
         // No explicit name provided - derive from function name (snake_case to PascalCase)
         let func_name = func.sig.ident.to_string();
@@ -358,6 +368,8 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
         for ident in &args {
             if ident == "spirv_passthrough" {
                 spirv_passthrough = true;
+            } else if ident == "force_cpu_coroutines" {
+                force_cpu_coroutines = true;
             } else {
                 if name.is_some() {
                     return syn::Error::new_spanned(
@@ -618,8 +630,12 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
 
     // ── CPU dispatch code generation ─────────────────────────────────────
     let func_ident = &func.sig.ident;
-    let cpu_dispatch_block =
-        cpu::generate_cpu_dispatch_block(&original_params, workgroup_size, func_ident);
+    let cpu_dispatch_block = cpu::generate_cpu_dispatch_block(
+        &original_params,
+        workgroup_size,
+        func_ident,
+        force_cpu_coroutines,
+    );
 
     // ── CUDA (nvptx64) kernel entry point generation ─────────────────────
     let func_name_str = func.sig.ident.to_string();
@@ -743,8 +759,20 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
                     format!("{}::{}", module, entry_point)
                 };
 
+                // On wasm/WebGPU, wgpu transpiles the SPIR-V to WGSL via naga and matches
+                // the requested entry point against the generated WGSL function name. naga's
+                // Namer sanitizes identifiers: `::` -> `_`, and additionally appends a
+                // trailing `_` when the name ends in a digit (it reserves that suffix for its
+                // own numeric disambiguation). Mirror both rules so the lookup matches, e.g.
+                // `linalg::reduce::reduce_add_f32` -> `linalg_reduce_reduce_add_f32_`.
                 #[cfg(target_arch = "wasm32")]
-                let full_entry = full_entry.replace("::", "_");
+                let full_entry = {
+                    let mut full_entry = full_entry.replace("::", "_");
+                    if matches!(full_entry.bytes().last(), Some(b'0'..=b'9')) {
+                        full_entry.push('_');
+                    }
+                    full_entry
+                };
 
                 Self::from_bytes(backend, file.contents(), &full_entry)
             }

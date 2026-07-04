@@ -40,6 +40,17 @@ pub struct WebGpuBufferSlice<'a> {
     pub(crate) byte_len: u64,
 }
 
+impl<'a> WebGpuBufferSlice<'a> {
+    /// Wraps a foreign `wgpu::Buffer` (e.g. one owned by another library sharing
+    /// this device) as a buffer slice spanning its whole range.
+    pub fn from_wgpu(buffer: &'a wgpu::Buffer) -> Self {
+        Self {
+            inner: buffer.slice(..),
+            byte_len: buffer.size(),
+        }
+    }
+}
+
 impl<'a> From<WebGpuBufferSlice<'a>> for wgpu::BindingResource<'a> {
     fn from(slice: WebGpuBufferSlice<'a>) -> Self {
         slice.inner.into()
@@ -183,6 +194,28 @@ impl WebGpu {
             spirv_passthrough_enabled,
             timestamp_supported,
         })
+    }
+
+    /// Builds a WebGPU backend on top of an already-created wgpu device/queue,
+    /// instead of creating its own (as [`Self::new`] does).
+    pub fn from_device(instance: Instance, adapter: Adapter, device: Device, queue: Queue) -> Self {
+        let timestamp_supported = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let is_vulkan_backend = adapter.get_info().backend == wgpu::Backend::Vulkan;
+        let spirv_passthrough_enabled = is_vulkan_backend
+            && device
+                .features()
+                .contains(wgpu::Features::PASSTHROUGH_SHADERS);
+
+        Self {
+            _instance: instance,
+            _adapter: adapter,
+            device,
+            queue,
+            force_buffer_copy_src: false,
+            hacks: vec![],
+            spirv_passthrough_enabled,
+            timestamp_supported,
+        }
     }
 
     /// Adds a regex-based text replacement to apply to WGSL source before compilation.
@@ -564,6 +597,11 @@ impl Backend for WebGpu {
         Ok(())
     }
 
+    fn poll(&self) {
+        // Non-blocking: process completed work and fire map callbacks.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+    }
+
     async fn read_buffer<T: MaybeSendSync + DeviceValue + AnyBitPattern>(
         &self,
         buffer: &Self::Buffer<T>,
@@ -891,6 +929,21 @@ impl<T: DeviceValue> crate::backend::Buffer<WebGpu, T> for Buffer {
 }
 
 /// WebGPU timestamp query manager for profiling compute passes.
+/// State of a non-blocking timestamp readback initiated by
+/// [`WebGpuTimestamps::request_read`].
+enum TimestampReadState {
+    /// No readback in flight.
+    Idle,
+    /// A readback was requested for a frame that recorded no passes.
+    Empty,
+    /// A buffer map is in flight; `rx` fires once the GPU has finished and the
+    /// staging buffer is mapped.
+    Pending {
+        rx: async_channel::Receiver<Result<(), wgpu::BufferAsyncError>>,
+        query_count: u32,
+    },
+}
+
 pub struct WebGpuTimestamps {
     query_set: wgpu::QuerySet,
     resolve_buffer: wgpu::Buffer,
@@ -899,6 +952,7 @@ pub struct WebGpuTimestamps {
     next_index: u32,
     labels: Vec<String>,
     timestamp_period: f32,
+    read_state: TimestampReadState,
 }
 
 impl WebGpuTimestamps {
@@ -936,6 +990,7 @@ impl WebGpuTimestamps {
             next_index: 0,
             labels: Vec::with_capacity(capacity as usize),
             timestamp_period,
+            read_state: TimestampReadState::Idle,
         })
     }
 
@@ -943,6 +998,14 @@ impl WebGpuTimestamps {
     pub fn reset(&mut self) {
         self.next_index = 0;
         self.labels.clear();
+        self.read_state = TimestampReadState::Idle;
+    }
+
+    /// Whether no non-blocking readback is in flight (safe to record + resolve a
+    /// new frame). While a [`request_read`](Self::request_read) is pending, the
+    /// staging buffer is mapped, so resolving into it again would be invalid.
+    pub fn is_idle(&self) -> bool {
+        matches!(self.read_state, TimestampReadState::Idle)
     }
 
     /// Resolves timestamp queries to a buffer and copies to staging for readback.
@@ -1006,22 +1069,87 @@ impl WebGpuTimestamps {
             self.staging_buffer.unmap();
         }
 
+        Ok(self.durations_from_raw(&raw_timestamps))
+    }
+
+    /// Initiates a non-blocking readback of the resolved timestamps.
+    ///
+    /// Call once after the frame's passes have been submitted (and after
+    /// [`resolve`](Self::resolve)). This issues an asynchronous buffer map and
+    /// returns immediately without blocking on the GPU. Poll for completion
+    /// with [`try_take`](Self::try_take).
+    pub fn request_read(&mut self) {
+        if self.next_index == 0 {
+            self.read_state = TimestampReadState::Empty;
+            return;
+        }
+        let query_count = self.next_index * 2;
+        let (sender, receiver) = async_channel::bounded(1);
+        self.staging_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |v| {
+                let _ = sender.force_send(v);
+            });
+        self.read_state = TimestampReadState::Pending {
+            rx: receiver,
+            query_count,
+        };
+    }
+
+    /// Non-blocking poll of a readback started by [`request_read`](Self::request_read).
+    ///
+    /// Returns `Some(results)` once the GPU work has completed and the staging
+    /// buffer is mapped; `None` while still in flight. The caller must drive
+    /// completion by polling the device (see [`WebGpu::poll`]).
+    pub fn try_take(&mut self) -> Option<Vec<GpuTimestamp>> {
+        match std::mem::replace(&mut self.read_state, TimestampReadState::Idle) {
+            TimestampReadState::Idle => None,
+            TimestampReadState::Empty => Some(Vec::new()),
+            TimestampReadState::Pending { rx, query_count } => match rx.try_recv() {
+                Ok(Ok(())) => {
+                    let mut raw = vec![0u64; query_count as usize];
+                    let buffer_slice = self.staging_buffer.slice(..);
+                    let data = buffer_slice.get_mapped_range();
+                    // SAFETY: u64 is AnyBitPattern; we copy at most the smaller
+                    // of the mapped range and our destination.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            raw.as_mut_ptr() as *mut u8,
+                            data.len().min(raw.len() * std::mem::size_of::<u64>()),
+                        );
+                    }
+                    drop(data);
+                    self.staging_buffer.unmap();
+                    Some(self.durations_from_raw(&raw))
+                }
+                // Map failed: report no results rather than stalling the caller.
+                Ok(Err(_)) | Err(async_channel::TryRecvError::Closed) => Some(Vec::new()),
+                // Not ready yet: keep the pending state and report back later.
+                Err(async_channel::TryRecvError::Empty) => {
+                    self.read_state = TimestampReadState::Pending { rx, query_count };
+                    None
+                }
+            },
+        }
+    }
+
+    /// Converts raw `(begin, end)` tick pairs into labeled millisecond durations.
+    fn durations_from_raw(&self, raw: &[u64]) -> Vec<GpuTimestamp> {
         let period_ms = self.timestamp_period as f64 / 1_000_000.0;
-        let results = self
-            .labels
+        self.labels
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let begin = raw_timestamps[i * 2];
-                let end = raw_timestamps[i * 2 + 1];
+                let begin = raw[i * 2];
+                let end = raw[i * 2 + 1];
                 let duration_ms = (end.wrapping_sub(begin)) as f64 * period_ms;
                 GpuTimestamp {
                     label: label.clone(),
                     duration_ms,
                 }
             })
-            .collect();
-        Ok(results)
+            .collect()
     }
 
     /// Allocates a begin/end timestamp pair for a labeled pass.

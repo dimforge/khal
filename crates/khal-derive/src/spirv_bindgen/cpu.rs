@@ -222,6 +222,7 @@ pub(super) fn generate_cpu_dispatch_block(
     original_params: &[OriginalParam],
     workgroup_size: [u32; 3],
     func_ident: &syn::Ident,
+    force_coroutines: bool,
 ) -> proc_macro2::TokenStream {
     let wg_x = workgroup_size[0];
     let wg_y = workgroup_size[1];
@@ -250,7 +251,10 @@ pub(super) fn generate_cpu_dispatch_block(
     if cfg_variant_sets.is_empty() {
         // No cfg-gated params: single variant with all params.
         let all_params: Vec<&OriginalParam> = original_params.iter().collect();
-        let body = generate_variant_body(&all_params, workgroup_size);
+        let mut body = generate_variant_body(&all_params, workgroup_size);
+        // `force_cpu_coroutines`: force the coroutine path even with no workgroup param,
+        // so `barrier_wait()` actually synchronizes.
+        body.has_workgroup |= force_coroutines;
         let dispatch_loop = gen_dispatch_loop(&body, workgroup_size, func_ident);
 
         quote! {
@@ -284,7 +288,8 @@ pub(super) fn generate_cpu_dispatch_block(
                     })
                     .collect();
 
-                let body = generate_variant_body(&active_params, workgroup_size);
+                let mut body = generate_variant_body(&active_params, workgroup_size);
+                body.has_workgroup |= force_coroutines;
                 let dispatch_loop = gen_dispatch_loop(&body, workgroup_size, func_ident);
 
                 quote! {

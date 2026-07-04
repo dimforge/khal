@@ -13,7 +13,7 @@ derive = ["khal-derive"]
 webgpu = ["khal-derive?/webgpu"]
 cpu = ["khal-derive?/cpu"]
 cuda = ["dep:cudarc", "khal-derive?/cuda"]
-metal = ["dep:metal", "dep:naga", "khal-derive?/webgpu"]
+metal = ["dep:metal", "dep:naga", "dep:block", "khal-derive?/webgpu"]
 push_constants = []
 subgroup_ops = []
 
@@ -40,6 +40,9 @@ paste = "1"
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = { version = "0.32", optional = true }
 naga = { version = "29", optional = true, features = ["spv-in", "msl-out"] }
+# Objective-C block support for Metal command-buffer completion handlers
+# (non-blocking readback completion). Matches metal-rs's own `block` dep.
+block = { version = "0.1.6", optional = true }
 
 [lints.rust]
 # The `objc` crate's `msg_send!` macro (used by the Metal backend) expands to

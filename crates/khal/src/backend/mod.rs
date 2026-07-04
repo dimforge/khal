@@ -240,6 +240,14 @@ pub trait Backend: 'static + Sized + MaybeSendSync {
     ) -> Self::Dispatch<'a>;
     /// Blocks until all submitted GPU work has completed.
     fn synchronize(&self) -> Result<(), Self::Error>;
+    /// Non-blocking maintenance poll.
+    ///
+    /// Lets the backend make progress on already-submitted work and fire any
+    /// completion callbacks (e.g. buffer map callbacks on the wgpu backend).
+    /// Unlike [`synchronize`](Self::synchronize), this never blocks waiting on
+    /// the GPU. Call it once per frame to drive non-blocking readbacks such as
+    /// [`crate::backend::GpuTimestamps::try_take`].
+    fn poll(&self) {}
     /// Submits the recorded commands in the encoder for execution.
     fn submit(&self, encoder: Self::Encoder) -> Result<(), Self::Error>;
 

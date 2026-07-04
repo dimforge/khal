@@ -15,6 +15,7 @@ use crate::backend::{
 use crate::shader::{BindGroupLayoutInfo, ShaderArgsError};
 use bytemuck::{AnyBitPattern, NoUninit};
 // metal re-exports objc; pull in its macros so msg_send! / sel! resolve.
+use block::ConcreteBlock;
 use metal::objc::runtime::Object;
 use metal::objc::{msg_send, sel, sel_impl};
 use metal::{
@@ -26,6 +27,7 @@ use metal::{
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ── Core backend ───────────────────────────────────────────────────────
@@ -47,6 +49,29 @@ pub struct Metal {
 // these, but the underlying Objective-C objects are.
 unsafe impl Send for Metal {}
 unsafe impl Sync for Metal {}
+
+impl Metal {
+    /// Commits an empty command buffer with a completion handler that flips the
+    /// returned flag once the GPU finishes it.
+    ///
+    /// Because the queue completes command buffers in commit order, the flag
+    /// being set means every earlier submission has finished. The handler fires
+    /// asynchronously on the GPU's completion — unlike polling `status()`, this
+    /// needs no `synchronize()`/drain to make progress, so the non-blocking
+    /// readback paths ([`MetalTimestamps`], `GpuReadback`) work on their own.
+    pub(crate) fn commit_completion(&self) -> Arc<AtomicBool> {
+        let done = Arc::new(AtomicBool::new(false));
+        let done_handler = done.clone();
+        let cb = self.queue.new_command_buffer();
+        let handler = ConcreteBlock::new(move |_cb: &metal::CommandBufferRef| {
+            done_handler.store(true, Ordering::Release);
+        })
+        .copy();
+        cb.add_completed_handler(&handler);
+        cb.commit();
+        done
+    }
+}
 
 /// Cached info needed to issue GPU timestamp queries on this device.
 struct MetalTimingCaps {
@@ -327,6 +352,12 @@ pub struct MetalTimestamps {
     labels: Vec<String>,
     /// Tick → nanosecond multiplier captured from the backend at creation.
     period_ns: f64,
+    /// Completion flag for the fence committed by [`request_read`](Self::request_read),
+    /// flipped by its command-buffer completion handler. Because the queue
+    /// completes buffers in commit order, this being set means every earlier
+    /// buffer — including the ones that sampled these timestamps — has finished
+    /// writing the shared sample buffer.
+    done: Option<Arc<AtomicBool>>,
 }
 
 // SAFETY: CounterSampleBuffer wraps an MTLCounterSampleBuffer, thread-safe.
@@ -356,6 +387,7 @@ impl MetalTimestamps {
             next_index: 0,
             labels: Vec::with_capacity(capacity as usize),
             period_ns: caps.period_ns,
+            done: None,
         })
     }
 
@@ -363,6 +395,37 @@ impl MetalTimestamps {
     pub fn reset(&mut self) {
         self.next_index = 0;
         self.labels.clear();
+        self.done = None;
+    }
+
+    /// Whether no non-blocking readback is in flight (safe to record a new frame).
+    pub fn is_idle(&self) -> bool {
+        self.done.is_none()
+    }
+
+    /// Initiates a non-blocking readback of the sampled timestamps.
+    ///
+    /// Call once after the frame's passes have been submitted. Commits an empty
+    /// fence command buffer and returns immediately; poll for completion with
+    /// [`try_take`](Self::try_take).
+    pub fn request_read(&mut self, metal: &Metal) {
+        self.done = Some(metal.commit_completion());
+    }
+
+    /// Non-blocking poll of a readback started by [`request_read`](Self::request_read).
+    ///
+    /// Returns `Some(results)` once the fence's completion handler has fired (so
+    /// the sampled values are valid), or `None` while the GPU is still running.
+    pub fn try_take(&mut self) -> Option<Vec<GpuTimestamp>> {
+        let ready = self
+            .done
+            .as_ref()
+            .is_some_and(|d| d.load(Ordering::Acquire));
+        if !ready {
+            return None;
+        }
+        self.done = None;
+        Some(self.read().unwrap_or_default())
     }
 
     /// Reads back timestamp results after GPU synchronization.
