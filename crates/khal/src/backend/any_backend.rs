@@ -986,11 +986,9 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
             #[cfg(feature = "webgpu")]
             (GpuBuffer::WebGpu(buffer), _) => {
                 let (sender, receiver) = async_channel::bounded(1);
-                buffer
-                    .slice(..)
-                    .map_async(wgpu::MapMode::Read, move |v| {
-                        let _ = sender.force_send(v);
-                    });
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |v| {
+                    let _ = sender.force_send(v);
+                });
                 ReadbackState::WebGpu(receiver)
             }
             #[cfg(feature = "metal")]

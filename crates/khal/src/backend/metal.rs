@@ -15,6 +15,7 @@ use crate::backend::{
 use crate::shader::{BindGroupLayoutInfo, ShaderArgsError};
 use bytemuck::{AnyBitPattern, NoUninit};
 // metal re-exports objc; pull in its macros so msg_send! / sel! resolve.
+use block::ConcreteBlock;
 use metal::objc::runtime::Object;
 use metal::objc::{msg_send, sel, sel_impl};
 use metal::{
@@ -23,11 +24,10 @@ use metal::{
     CounterSampleBufferDescriptor, CounterSet, Device, Library, MTLCounterSamplingPoint,
     MTLDispatchType, MTLResourceOptions, MTLSize, MTLStorageMode, NSRange, NSUInteger,
 };
-use block::ConcreteBlock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ── Core backend ───────────────────────────────────────────────────────

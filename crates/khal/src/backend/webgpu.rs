@@ -198,16 +198,13 @@ impl WebGpu {
 
     /// Builds a WebGPU backend on top of an already-created wgpu device/queue,
     /// instead of creating its own (as [`Self::new`] does).
-    pub fn from_device(
-        instance: Instance,
-        adapter: Adapter,
-        device: Device,
-        queue: Queue,
-    ) -> Self {
+    pub fn from_device(instance: Instance, adapter: Adapter, device: Device, queue: Queue) -> Self {
         let timestamp_supported = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let is_vulkan_backend = adapter.get_info().backend == wgpu::Backend::Vulkan;
         let spirv_passthrough_enabled = is_vulkan_backend
-            && device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS);
+            && device
+                .features()
+                .contains(wgpu::Features::PASSTHROUGH_SHADERS);
 
         Self {
             _instance: instance,
