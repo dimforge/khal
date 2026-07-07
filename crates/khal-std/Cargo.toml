@@ -52,13 +52,6 @@ workspace = true
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
 spirv-std = "0.10.0-alpha.1"
-# Cap glam < 0.33 for the shader build: spirv-std 0.10.0-alpha.1 declares glam
-# ">=0.30.8" (open-ended), but glam 0.33 dropped `UVec4`/`UVec3` under
-# default-features=false, which breaks spirv-std's compile (112 errors). The
-# `cargo gpu build` sub-invocation re-resolves without the workspace lock and
-# would otherwise pick the newest 0.33.x. 0.32.1 is the newest pre-0.33 version
-# that still works. (Mirrors the same pin in vortx-shaders.)
-glam = { version = "=0.32.1", default-features = false }
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
 # Fixes the UVec3::element_product bug. Optional: only the `rust-cuda` backend
