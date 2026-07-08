@@ -46,6 +46,14 @@ rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
 spirv-std-macros = "0.10.0-alpha.1"
 khal-derive = { version = "0.2.0", path = "../khal-derive" }
+# `Float` for the cuda-oxide backend (libm software math, no_std).
+num-traits = { version = "0.2", default-features = false, features = ["libm"], optional = true }
+# cuda-oxide device API (sregs, barriers, warp shuffles, atomics, SharedArray).
+# Plain (not target-gated) dependency: with the cuda-oxide backend the shader
+# crate is compiled on the HOST target (unified interception) or for nvptx64
+# (device-only builds); the importer recognizes the API by name either way.
+# Lives in the cuda-oxide tree; the path is machine-local.
+cuda-device = { path = "/home/xavier/cuda-oxide-src/crates/cuda-device", optional = true }
 
 [lints]
 workspace = true
@@ -55,10 +63,6 @@ spirv-std = "0.10.0-alpha.1"
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
 # Fixes the UVec3::element_product bug. Optional: only the `rust-cuda` backend
-# (rustc_codegen_nvvm) uses it; the `cuda-oxide` backend declares its own
-# intrinsics instead (cuda_std does not build under `-Zbuild-std`).
+# (rustc_codegen_nvvm) uses it; the `cuda-oxide` backend routes through
+# cuda-device instead (cuda_std does not build under `-Zbuild-std`).
 cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up", optional = true }
-# `Float` for the cuda-oxide backend (libm software math, no_std).
-num-traits = { version = "0.2", default-features = false, features = ["libm"], optional = true }
-# (cuda-oxide device build only, added on the build box:)
-cuda-device = { path = "/home/xavier/cuda-oxide-src/crates/cuda-device", optional = true }

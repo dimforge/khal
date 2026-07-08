@@ -10,8 +10,8 @@
 #![cfg_attr(target_arch = "nvptx64", feature(asm_experimental_arch))]
 // `Float` for the cuda-oxide backend calls `core::intrinsics::{expf32,..}`
 // (lowered to libdevice `__nv_*` by cuda-oxide) instead of software libm.
-#![cfg_attr(all(target_arch = "nvptx64", feature = "cuda-oxide"), feature(core_intrinsics))]
-#![cfg_attr(all(target_arch = "nvptx64", feature = "cuda-oxide"), allow(internal_features))]
+#![cfg_attr(feature = "cuda-oxide", feature(core_intrinsics))]
+#![cfg_attr(feature = "cuda-oxide", allow(internal_features))]
 
 /// Architecture-specific runtime support (CPU coroutines, CUDA intrinsics).
 pub mod arch;
@@ -41,20 +41,20 @@ pub use glamx;
 
 #[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
 pub use cuda_std;
-/// cuda-oxide device crate (re-exported so the `spirv_bindgen`-generated CUDA
-/// entry points can name `khal_std::cuda_device::kernel` without the shader
-/// crate depending on cuda-device directly).
-#[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
-pub use cuda_device;
+// NOTE: cuda-device is deliberately NOT re-exported at the crate root: a
+// `pub use cuda_device;` gives its functions a `khal_std::cuda_device::*`
+// visible path, which breaks the cuda-oxide importer's by-name intrinsic
+// dispatch (it matches the canonical `cuda_device::*` paths). The types the
+// generated entry code needs are re-exported from `cuda_oxide_glue` instead.
 
 /// Glue for the cuda-oxide `spirv_bindgen` entry transform: wraps a
 /// `&'static mut SharedArray` so a `#[spirv(workgroup)] &mut [T; N]` parameter
 /// body (which calls `MaybeIndexUnchecked::read/write/at_mut`) lands on shared
 /// memory.
-#[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+#[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
 pub mod cuda_oxide_glue {
     use crate::index::MaybeIndexUnchecked;
-    use cuda_device::SharedArray;
+    pub use cuda_device::SharedArray;
 
     pub struct SmemBuf<T: 'static, const N: usize>(pub &'static mut SharedArray<T, N>);
     impl<T: Copy, const N: usize> MaybeIndexUnchecked<T> for SmemBuf<T, N> {

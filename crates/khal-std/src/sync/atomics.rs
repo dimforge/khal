@@ -96,12 +96,12 @@ pub fn atomic_load_u32(ptr: &mut u32) -> u32 {
     // core's `AtomicU32::load` keeps a reachable panic arm (`AcqRel` load),
     // which the cuda-oxide backend rejects; use the cuda-device atomic, whose
     // load lowers directly to `ld.relaxed.gpu`.
-    #[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
     {
         use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
         unsafe { DeviceAtomicU32::from_ptr(ptr) }.load(AtomicOrdering::Relaxed)
     }
-    #[cfg(not(any(target_arch = "spirv", all(target_arch = "nvptx64", feature = "cuda-oxide"))))]
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -121,13 +121,13 @@ pub fn atomic_load_u32_shared(ptr: &u32) -> u32 {
         >(ptr)
     }
     // See `atomic_load_u32`: avoid core's panic-carrying load on cuda-oxide.
-    #[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
     {
         use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
         unsafe { DeviceAtomicU32::from_ptr(ptr as *const u32 as *mut u32) }
             .load(AtomicOrdering::Relaxed)
     }
-    #[cfg(not(any(target_arch = "spirv", all(target_arch = "nvptx64", feature = "cuda-oxide"))))]
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *const u32 as *const AtomicU32) };
@@ -289,12 +289,12 @@ pub fn atomic_store_u32_workgroup(ptr: &mut u32, value: u32) {
         >(ptr, value);
     }
     // See `atomic_load_u32`: avoid core's panic-carrying store on cuda-oxide.
-    #[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
     {
         use cuda_device::atomic::{AtomicOrdering, BlockAtomicU32};
         unsafe { BlockAtomicU32::from_ptr(ptr) }.store(value, AtomicOrdering::Relaxed);
     }
-    #[cfg(not(any(target_arch = "spirv", all(target_arch = "nvptx64", feature = "cuda-oxide"))))]
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -314,12 +314,12 @@ pub fn atomic_load_u32_workgroup(ptr: &mut u32) -> u32 {
         >(ptr)
     }
     // See `atomic_load_u32`: avoid core's panic-carrying load on cuda-oxide.
-    #[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
     {
         use cuda_device::atomic::{AtomicOrdering, BlockAtomicU32};
         unsafe { BlockAtomicU32::from_ptr(ptr) }.load(AtomicOrdering::Relaxed)
     }
-    #[cfg(not(any(target_arch = "spirv", all(target_arch = "nvptx64", feature = "cuda-oxide"))))]
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };

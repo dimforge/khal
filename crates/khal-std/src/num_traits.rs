@@ -6,13 +6,13 @@
 //   software math does not resolve under cuda-oxide's PTX backend.)
 #[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
 pub use cuda_std::float::GpuFloat as Float;
-#[cfg(not(target_arch = "nvptx64"))]
+#[cfg(not(any(target_arch = "nvptx64", feature = "cuda-oxide")))]
 pub use spirv_std::num_traits::Float;
 
-#[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+#[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
 pub use cuda_oxide_float::Float;
 
-#[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
+#[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
 mod cuda_oxide_float {
     /// Minimal `Float` for the cuda-oxide PTX backend. Methods lower to
     /// libdevice (`__nv_expf`, `__nv_sqrtf`, …) via `core::intrinsics`.

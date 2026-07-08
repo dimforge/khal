@@ -403,8 +403,8 @@ pub(super) fn generate_cuda_oxide_entry_block(
                                 syn::Ident::new(&format!("__smembuf_{}", name), name.span());
                             preludes.push(quote! {
                                 static mut #static_name:
-                                    khal_std::cuda_device::SharedArray<#elem_ty, { #len_expr }> =
-                                    khal_std::cuda_device::SharedArray::UNINIT;
+                                    khal_std::cuda_oxide_glue::SharedArray<#elem_ty, { #len_expr }> =
+                                    khal_std::cuda_oxide_glue::SharedArray::UNINIT;
                                 let mut #sb_name = khal_std::cuda_oxide_glue::SmemBuf(
                                     unsafe { &mut *core::ptr::addr_of_mut!(#static_name) }
                                 );
@@ -419,9 +419,9 @@ pub(super) fn generate_cuda_oxide_entry_block(
                                 syn::Ident::new(&format!("__sref_{}", name), name.span());
                             preludes.push(quote! {
                                 static mut #static_name:
-                                    khal_std::cuda_device::SharedArray<#elem_ty, 1> =
-                                    khal_std::cuda_device::SharedArray::UNINIT;
-                                let #sref_name: &mut khal_std::cuda_device::SharedArray<#elem_ty, 1> =
+                                    khal_std::cuda_oxide_glue::SharedArray<#elem_ty, 1> =
+                                    khal_std::cuda_oxide_glue::SharedArray::UNINIT;
+                                let #sref_name: &mut khal_std::cuda_oxide_glue::SharedArray<#elem_ty, 1> =
                                     unsafe { &mut *core::ptr::addr_of_mut!(#static_name) };
                                 let #name: &mut #elem_ty = &mut #sref_name[0];
                             });
@@ -436,10 +436,28 @@ pub(super) fn generate_cuda_oxide_entry_block(
 
     let body = &func.block;
 
+    // Name the entry with cuda-oxide's reserved kernel prefix directly
+    // (`cuda_oxide_kernel_246e25db_<entry>`) instead of going through the
+    // `#[kernel]` proc-macro: the collector roots kernels by that def-path
+    // marker and the PTX entry keeps the unprefixed base name, while the
+    // macro's host-side glue (a `cuda_host::CudaKernel` marker impl) would
+    // drag a cuda-host dependency into pure shader crates. Feature-gated,
+    // not target-gated: with the cuda-oxide backend installed the crate is
+    // compiled on the HOST target (unified interception) or for nvptx64
+    // (device-only builds) — the entry is generated identically for both.
+    let prefixed_entry_ident = syn::Ident::new(
+        &format!("cuda_oxide_kernel_246e25db_{}", cuda_entry_ident),
+        cuda_entry_ident.span(),
+    );
     quote! {
-        #[cfg(all(target_arch = "nvptx64", feature = "cuda-oxide"))]
-        #[khal_std::cuda_device::kernel]
-        pub fn #cuda_entry_ident(#(#kernel_params),*) {
+        #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+        #[allow(non_snake_case)]
+        // `no_mangle` forces local codegen: without it rustc's
+        // cross-crate-inlinable heuristic skips emitting a mono item for
+        // trivial kernels (nothing in-crate calls an entry point), and the
+        // collector never sees them.
+        #[unsafe(no_mangle)]
+        pub fn #prefixed_entry_ident(#(#kernel_params),*) {
             #(#preludes)*
             #(#array_reconstructions)*
             #body
