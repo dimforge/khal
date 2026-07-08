@@ -8,7 +8,38 @@ use cudarc::driver::{self, CudaContext, CudaStream};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+static KERNEL_PROFILE: OnceLock<Mutex<HashMap<String, (u64, u128)>>> = OnceLock::new();
+fn kernel_profile() -> &'static Mutex<HashMap<String, (u64, u128)>> {
+    KERNEL_PROFILE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// Print accumulated per-kernel timings (sorted desc) and clear. No-op if unused.
+pub fn dump_kernel_profile() {
+    let mut map = kernel_profile().lock().unwrap();
+    if map.is_empty() {
+        return;
+    }
+    let mut rows: Vec<_> = map.iter().map(|(k, (c, ns))| (k.clone(), *c, *ns)).collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2));
+    let total: u128 = rows.iter().map(|r| r.2).sum();
+    eprintln!(
+        "\n=== KHAL_CUDA_PROFILE: {} kernels, {:.3} ms total (serialized) ===",
+        rows.len(),
+        total as f64 / 1e6
+    );
+    for (n, c, ns) in &rows {
+        eprintln!(
+            "{:>9.3} ms  {:>6}x  {:>9.2} us  {:>6.2}%  {}",
+            *ns as f64 / 1e6,
+            c,
+            (*ns as f64 / *c as f64) / 1e3,
+            *ns as f64 / total as f64 * 100.0,
+            n
+        );
+    }
+    map.clear();
+}
 
 // ── Core backend ───────────────────────────────────────────────────────
 
@@ -39,9 +70,67 @@ impl Cuda {
         &self.ctx
     }
 
+    /// Compute capability `(major, minor)` of the underlying device, e.g.
+    /// `(12, 0)` for Blackwell `sm_120`. Used to pick the default backend.
+    pub fn compute_capability(&self) -> Result<(i32, i32), CudaBackendError> {
+        Ok(self.ctx.compute_capability()?)
+    }
+
     /// Returns the default stream.
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+
+    /// Begin CUDA stream capture on the default stream: subsequent kernel
+    /// launches are *recorded* into a graph instead of executed, until
+    /// [`Cuda::end_capture`]. Used by the GPU-resident rollout to capture a
+    /// repeated dispatch sequence (e.g. the physics decimation loop) once and
+    /// replay it with a single launch — eliminating per-launch host encode/submit
+    /// overhead. THREAD_LOCAL mode scopes capture to the current thread.
+    ///
+    /// The captured sequence must be replay-safe: no allocation/free, no host
+    /// syncs, and stable buffer addresses across replays.
+    pub fn begin_capture(&self) -> Result<(), CudaBackendError> {
+        use cudarc::driver::sys::CUstreamCaptureMode;
+        self.stream
+            .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?;
+        Ok(())
+    }
+
+    /// End stream capture and instantiate the recorded graph for replay. Errors
+    /// if nothing was captured (the stream wasn't in capture, or recorded no work).
+    pub fn end_capture(&self) -> Result<CapturedGraph, CudaBackendError> {
+        use cudarc::driver::sys::CUgraphInstantiate_flags;
+        // No instantiate flags (0). The flags enum has no zero variant; it is
+        // consumed as `flags as u32 as u64`, so a 0-valued enum means "no flags".
+        let no_flags: CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
+        let graph = self
+            .stream
+            .end_capture(no_flags)?
+            .ok_or(CudaBackendError::CaptureFailed)?;
+        Ok(CapturedGraph { graph })
+    }
+}
+
+/// A captured, instantiated CUDA graph. Replay the whole recorded kernel
+/// sequence with a single [`CapturedGraph::launch`] (one `cuGraphLaunch`),
+/// instead of re-encoding/re-submitting each dispatch from the host.
+pub struct CapturedGraph {
+    graph: driver::CudaGraph,
+}
+
+impl CapturedGraph {
+    /// Replay the captured kernel sequence with a single graph launch.
+    pub fn launch(&self) -> Result<(), CudaBackendError> {
+        self.graph.launch()?;
+        Ok(())
+    }
+
+    /// Pre-upload the graph's resources so the first [`CapturedGraph::launch`]
+    /// doesn't pay instantiation/upload cost.
+    pub fn upload(&self) -> Result<(), CudaBackendError> {
+        self.graph.upload()?;
+        Ok(())
     }
 }
 
@@ -55,6 +144,8 @@ pub enum CudaBackendError {
     Driver(#[from] driver::DriverError),
     #[error("Invalid PTX module")]
     InvalidPtx,
+    #[error("CUDA stream capture produced no graph")]
+    CaptureFailed,
 }
 
 // ── Buffer ─────────────────────────────────────────────────────────────
@@ -621,8 +712,22 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
                 self.function.name, param_values.len(), grid_dim, block_dim
             );
         }
+        let prof_start = if std::env::var_os("KHAL_CUDA_PROFILE").is_some() {
+            self.stream.synchronize()?;
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         unsafe {
             builder.launch(cfg)?;
+        }
+        if let Some(t0) = prof_start {
+            self.stream.synchronize()?;
+            let ns = t0.elapsed().as_nanos();
+            let mut map = kernel_profile().lock().unwrap();
+            let e = map.entry(self.function.name.clone()).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += ns;
         }
         if trace {
             match self.stream.synchronize() {

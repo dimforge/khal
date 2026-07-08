@@ -57,10 +57,88 @@ impl GpuBackend {
         }
     }
 
-    /// Returns `true` if this is the CUDA backend.
-    #[cfg(feature = "cuda")]
+    /// Returns `true` if this is the CUDA backend. Always available (returns
+    /// `false` when the `cuda` feature is disabled) so callers need not gate.
     pub fn is_cuda(&self) -> bool {
-        matches!(self, Self::Cuda(..))
+        #[cfg(feature = "cuda")]
+        {
+            matches!(self, Self::Cuda(..))
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            false
+        }
+    }
+
+    /// Auto-selects a backend: native CUDA on a Blackwell (sm_120+) device when
+    /// the `cuda` feature is compiled, else WebGPU. Override with
+    /// `KHAL_BACKEND=cuda|webgpu`.
+    pub async fn auto(features: wgpu::Features, limits: wgpu::Limits) -> anyhow::Result<Self> {
+        // Resolve any explicit override: Some(true)=force CUDA, Some(false)=force
+        // WebGPU, None=auto-detect.
+        let want_cuda = match std::env::var("KHAL_BACKEND").ok().as_deref() {
+            Some("cuda") | Some("CUDA") => Some(true),
+            Some("webgpu") | Some("WebGpu") | Some("wgpu") => Some(false),
+            Some(other) => {
+                eprintln!("[khal] unknown KHAL_BACKEND={other:?}; auto-detecting");
+                None
+            }
+            None => {
+                if std::env::var("BIPED_CUDA").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[khal] BIPED_CUDA=1 is deprecated; use KHAL_BACKEND=cuda (treating as such)"
+                    );
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if want_cuda == Some(false) {
+            eprintln!("[khal] backend = WebGPU");
+            return Ok(Self::WebGpu(WebGpu::new(features, limits).await?));
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            match Cuda::new(0) {
+                Ok(cuda) => {
+                    let cc = cuda.compute_capability().ok();
+                    let is_blackwell = matches!(cc, Some((maj, _)) if maj >= 12);
+                    if want_cuda == Some(true) || is_blackwell {
+                        match cc {
+                            Some((maj, min)) => {
+                                eprintln!("[khal] backend = native CUDA (sm_{maj}{min})")
+                            }
+                            None => eprintln!("[khal] backend = native CUDA"),
+                        }
+                        return Ok(Self::Cuda(cuda));
+                    }
+                    if let Some((maj, min)) = cc {
+                        eprintln!("[khal] CUDA device sm_{maj}{min} < sm_120; using WebGPU");
+                    }
+                }
+                Err(e) => {
+                    // Explicitly requested but unavailable -> surface the error;
+                    // otherwise silently fall back to WebGPU (no CUDA device).
+                    if want_cuda == Some(true) {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            if want_cuda == Some(true) {
+                eprintln!(
+                    "[khal] KHAL_BACKEND=cuda but the `cuda` feature isn't compiled; using WebGPU"
+                );
+            }
+        }
+
+        eprintln!("[khal] backend = WebGPU");
+        Ok(Self::WebGpu(WebGpu::new(features, limits).await?))
     }
 
     /// Returns `true` if this is the Metal backend.
