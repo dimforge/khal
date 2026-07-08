@@ -120,19 +120,35 @@ impl GpuBackend {
                     }
                 }
                 Err(e) => {
-                    // Explicitly requested but unavailable -> surface the error;
-                    // otherwise silently fall back to WebGPU (no CUDA device).
+                    // Explicitly requested but unavailable -> surface the error.
                     if want_cuda == Some(true) {
                         return Err(e.into());
                     }
+                    // Auto-detect: fall back, but never silently — a CUDA init
+                    // failure on a machine with an NVIDIA GPU is usually real
+                    // breakage (driver mismatch, exhausted contexts), and a
+                    // quiet WebGPU run hides it behind a slower working one.
+                    eprintln!("[khal] CUDA unavailable ({e}); using WebGPU");
                 }
             }
         }
         #[cfg(not(feature = "cuda"))]
         {
             if want_cuda == Some(true) {
+                // An explicit KHAL_BACKEND=cuda must not silently run on a
+                // different backend: results/performance would differ from
+                // what the user asked to measure.
+                anyhow::bail!(
+                    "KHAL_BACKEND=cuda but this binary was built without the `cuda` feature (rebuild with `--features cuda_backend` / `khal/cuda`)"
+                );
+            }
+            // Auto-detect on a machine that visibly has an NVIDIA GPU: still
+            // use WebGPU (only backend compiled in), but say what a cuda-less
+            // binary is leaving on the table — a stale or misbuilt binary
+            // otherwise degrades silently.
+            if std::path::Path::new("/dev/nvidiactl").exists() {
                 eprintln!(
-                    "[khal] KHAL_BACKEND=cuda but the `cuda` feature isn't compiled; using WebGPU"
+                    "[khal] NVIDIA GPU present but this binary was built without the `cuda` feature; using WebGPU"
                 );
             }
         }
@@ -1714,7 +1730,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBuffer<T> {
                 // push element count so kernel `slice.len()` is correct (off-by-size_of
                 // otherwise -> OOB reads, e.g. gpu_init_sort_dispatch / lbvh). Arrays,
                 // scalars and uniforms ignore this value, so they are unaffected.
-                dispatch.set_arg(binding, buffer.device_ptr_raw(), buffer.byte_len() / std::mem::size_of::<T>() as u64);
+                dispatch.set_arg(
+                    binding,
+                    buffer.device_ptr_raw(),
+                    buffer.byte_len() / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1746,7 +1766,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSlice<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSlice::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len / std::mem::size_of::<T>() as u64);
+                dispatch.set_arg(
+                    binding,
+                    slice.offset_ptr(),
+                    slice.byte_len / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1783,7 +1807,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSliceMut<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSliceMut::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len / std::mem::size_of::<T>() as u64);
+                dispatch.set_arg(
+                    binding,
+                    slice.offset_ptr(),
+                    slice.byte_len / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
