@@ -3,43 +3,41 @@
 //! Two backends provide the underlying `%tid`/`%ctaid`/`%ntid`/`%nctaid`
 //! special-register reads:
 //! - `rust-cuda` (default): `cuda_std::thread` (Rust-CUDA / rustc_codegen_nvvm).
-//! - `cuda-oxide`: khal_std's own `llvm.nvvm.read.ptx.sreg.*` externs, lowered
-//!   by the cuda-oxide PTX backend. `cuda_std` does not build under cuda-oxide.
+//! - `cuda-oxide`: `cuda_device::thread::*` accessors, recognized by name by
+//!   the cuda-oxide MIR importer. `cuda_std` does not build under cuda-oxide.
 
 use glamx::UVec3;
 
 #[cfg(not(feature = "cuda-oxide"))]
 use cuda_std::thread;
 
-/// khal_std's own nvptx special-register reads, used by the `cuda-oxide`
-/// backend in place of `cuda_std::thread`. Each lowers to a single
-/// `mov.u32 %r, %sreg` in PTX.
+/// Special-register reads for the `cuda-oxide` backend, routed through
+/// `cuda_device::thread::*`: the cuda-oxide MIR importer recognizes those
+/// paths by name on ANY compilation target, so this works both for unified
+/// (host-target) shader builds and for `--target nvptx64` device builds.
+/// Each lowers to a single `mov.u32 %r, %sreg` in PTX.
 #[cfg(feature = "cuda-oxide")]
 mod thread {
     macro_rules! sreg {
-        ($name:ident, $intr:literal) => {
+        ($name:ident, $dev:ident) => {
             #[inline(always)]
             pub fn $name() -> u32 {
-                unsafe extern "C" {
-                    #[link_name = $intr]
-                    fn f() -> u32;
-                }
-                unsafe { f() }
+                cuda_device::thread::$dev()
             }
         };
     }
-    sreg!(thread_idx_x, "llvm.nvvm.read.ptx.sreg.tid.x");
-    sreg!(thread_idx_y, "llvm.nvvm.read.ptx.sreg.tid.y");
-    sreg!(thread_idx_z, "llvm.nvvm.read.ptx.sreg.tid.z");
-    sreg!(block_idx_x, "llvm.nvvm.read.ptx.sreg.ctaid.x");
-    sreg!(block_idx_y, "llvm.nvvm.read.ptx.sreg.ctaid.y");
-    sreg!(block_idx_z, "llvm.nvvm.read.ptx.sreg.ctaid.z");
-    sreg!(block_dim_x, "llvm.nvvm.read.ptx.sreg.ntid.x");
-    sreg!(block_dim_y, "llvm.nvvm.read.ptx.sreg.ntid.y");
-    sreg!(block_dim_z, "llvm.nvvm.read.ptx.sreg.ntid.z");
-    sreg!(grid_dim_x, "llvm.nvvm.read.ptx.sreg.nctaid.x");
-    sreg!(grid_dim_y, "llvm.nvvm.read.ptx.sreg.nctaid.y");
-    sreg!(grid_dim_z, "llvm.nvvm.read.ptx.sreg.nctaid.z");
+    sreg!(thread_idx_x, threadIdx_x);
+    sreg!(thread_idx_y, threadIdx_y);
+    sreg!(thread_idx_z, threadIdx_z);
+    sreg!(block_idx_x, blockIdx_x);
+    sreg!(block_idx_y, blockIdx_y);
+    sreg!(block_idx_z, blockIdx_z);
+    sreg!(block_dim_x, blockDim_x);
+    sreg!(block_dim_y, blockDim_y);
+    sreg!(block_dim_z, blockDim_z);
+    sreg!(grid_dim_x, gridDim_x);
+    sreg!(grid_dim_y, gridDim_y);
+    sreg!(grid_dim_z, gridDim_z);
 }
 
 /// Returns the thread index within the current block as a `UVec3`.

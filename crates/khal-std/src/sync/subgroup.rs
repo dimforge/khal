@@ -11,11 +11,15 @@ pub fn subgroup_f_add(val: f32) -> f32 {
     {
         spirv_std::arch::subgroup_f_add(val)
     }
-    #[cfg(target_arch = "nvptx64")]
+    #[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
     {
         warp_reduce_add(val)
     }
-    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+    #[cfg(not(any(
+        target_arch = "spirv",
+        target_arch = "nvptx64",
+        feature = "cuda-oxide"
+    )))]
     {
         val
     }
@@ -34,17 +38,30 @@ pub fn subgroup_f_max(val: f32) -> f32 {
     {
         spirv_std::arch::subgroup_f_max(val)
     }
-    #[cfg(target_arch = "nvptx64")]
+    #[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
     {
         warp_reduce_max(val)
     }
-    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+    #[cfg(not(any(
+        target_arch = "spirv",
+        target_arch = "nvptx64",
+        feature = "cuda-oxide"
+    )))]
     {
         val
     }
 }
 
-#[cfg(target_arch = "nvptx64")]
+// cuda-oxide: warp shuffle through `cuda_device::warp`, recognized by name
+// by the MIR importer on any compilation target.
+#[cfg(feature = "cuda-oxide")]
+#[inline(always)]
+fn shfl_xor_sync(val: f32, lane_mask: u32) -> f32 {
+    cuda_device::warp::shuffle_xor_f32(val, lane_mask)
+}
+
+// rust-cuda (rustc_codegen_nvvm): inline PTX.
+#[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
 #[inline(always)]
 fn shfl_xor_sync(val: f32, lane_mask: u32) -> f32 {
     let result: f32;
@@ -59,7 +76,7 @@ fn shfl_xor_sync(val: f32, lane_mask: u32) -> f32 {
     result
 }
 
-#[cfg(target_arch = "nvptx64")]
+#[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
 #[inline(always)]
 fn warp_reduce_add(mut val: f32) -> f32 {
     val += shfl_xor_sync(val, 16);
@@ -70,7 +87,7 @@ fn warp_reduce_add(mut val: f32) -> f32 {
     val
 }
 
-#[cfg(target_arch = "nvptx64")]
+#[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
 #[inline(always)]
 fn warp_reduce_max(mut val: f32) -> f32 {
     let other = shfl_xor_sync(val, 16);

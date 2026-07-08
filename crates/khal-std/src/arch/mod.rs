@@ -4,5 +4,5 @@
 #[cfg(feature = "cpu")]
 pub mod cpu;
 /// CUDA intrinsics for thread and block indexing.
-#[cfg(target_arch = "nvptx64")]
+#[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
 pub mod cuda;
