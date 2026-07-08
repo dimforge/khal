@@ -175,9 +175,32 @@ impl KhalBuilder {
     }
 
     /// Compiles the shader crate to PTX for the CUDA backend.
+    ///
+    /// `CUDA_OXIDE_SHADERS_PTX_<SHADER_CRATE_NAME>` (upper-snake, e.g.
+    /// `CUDA_OXIDE_SHADERS_PTX_VORTX_SHADERS`) points at a prebuilt PTX/cubin;
+    /// when set it is embedded directly as `shaders.ptx` and the `cargo cuda`
+    /// (cuda-oxide) toolchain is not required.
     #[cfg(feature = "cuda")]
     fn build_ptx(&self, output_dir: impl AsRef<Path>) {
         let output_dir = output_dir.as_ref();
+
+        let crate_name = self
+            .shader_crate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_uppercase()
+            .replace('-', "_");
+        let env_key = format!("CUDA_OXIDE_SHADERS_PTX_{crate_name}");
+        println!("cargo:rerun-if-env-changed={env_key}");
+        if let Some(prebuilt) = std::env::var_os(&env_key) {
+            let dst = output_dir.join("shaders.ptx");
+            std::fs::copy(&prebuilt, &dst).unwrap_or_else(|e| {
+                panic!("failed to copy prebuilt PTX {prebuilt:?} ({env_key}) to {dst:?}: {e}")
+            });
+            return;
+        }
+
         let features_str = self.features.join(",");
 
         let mut args = vec![
