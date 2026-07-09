@@ -20,7 +20,10 @@ pub fn dump_kernel_profile() {
     if map.is_empty() {
         return;
     }
-    let mut rows: Vec<_> = map.iter().map(|(k, (c, ns))| (k.clone(), *c, *ns)).collect();
+    let mut rows: Vec<_> = map
+        .iter()
+        .map(|(k, (c, ns))| (k.clone(), *c, *ns))
+        .collect();
     rows.sort_by(|a, b| b.2.cmp(&a.2));
     let total: u128 = rows.iter().map(|r| r.2).sum();
     eprintln!(
@@ -57,7 +60,10 @@ impl Cuda {
     /// Creates a new CUDA backend using the specified device ordinal.
     pub fn new(device_ordinal: usize) -> Result<Self, CudaBackendError> {
         let ctx = CudaContext::new(device_ordinal)?;
-        let stream = ctx.default_stream();
+        // An owned non-default stream: the legacy NULL stream cannot be
+        // captured into a CUDA graph (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED),
+        // and all khal work is ordered on this one stream anyway.
+        let stream = ctx.new_stream()?;
         Ok(Self {
             ctx,
             stream,
@@ -417,7 +423,10 @@ impl Backend for Cuda {
                 return Err(e.into());
             }
         };
-        Ok(CudaFunction { func, name: entry_point.to_string() })
+        Ok(CudaFunction {
+            func,
+            name: entry_point.to_string(),
+        })
     }
 
     fn load_function_with_layouts(
@@ -632,6 +641,9 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
             DispatchGrid::Indirect(buffer) => {
                 // CUDA doesn't support indirect dispatch natively.
                 // Read the 12-byte dispatch args from device memory.
+                if std::env::var("KHAL_TRACE_INDIRECT").is_ok() {
+                    eprintln!("[khal] indirect dispatch: {}", self.function.name);
+                }
                 self.stream.synchronize()?;
                 if let Some(ref inner) = buffer.inner {
                     let bytes: Vec<u8> = self.stream.clone_dtoh(inner)?;
@@ -709,7 +721,10 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
         if trace {
             eprintln!(
                 "[khal-cuda launch] {} nargs={} grid={:?} block={:?}",
-                self.function.name, param_values.len(), grid_dim, block_dim
+                self.function.name,
+                param_values.len(),
+                grid_dim,
+                block_dim
             );
         }
         let prof_start = if std::env::var_os("KHAL_CUDA_PROFILE").is_some() {
