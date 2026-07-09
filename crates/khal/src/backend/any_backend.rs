@@ -1179,6 +1179,14 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
 }
 
 impl Backend for GpuBackend {
+    #[cfg(feature = "cuda")]
+    fn as_cuda(&self) -> Option<&super::cuda::Cuda> {
+        match self {
+            Self::Cuda(c) => Some(c),
+            _ => None,
+        }
+    }
+
     const NAME: &'static str = "any";
     const TARGET: super::CompileTarget = super::CompileTarget::Wgsl;
 
