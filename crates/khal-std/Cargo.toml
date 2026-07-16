@@ -52,8 +52,15 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"], o
 # Plain (not target-gated) dependency: with the cuda-oxide backend the shader
 # crate is compiled on the HOST target (unified interception) or for nvptx64
 # (device-only builds); the importer recognizes the API by name either way.
-# Lives in the cuda-oxide tree; the path is machine-local.
-cuda-device = { path = "/home/xavier/cuda-oxide-src/crates/cuda-device", optional = true }
+#
+# Pinned by git rev, not by path. This was previously
+#   path = "/home/xavier/cuda-oxide-src/crates/cuda-device"
+# an absolute path into one developer's home directory, so `--features
+# cuda-oxide` could not resolve on any other machine -- which is precisely the
+# portability the feature comment above promises. cuda-device is not published
+# on crates.io, so a git rev is the portable way to express it. Override with a
+# local checkout via [patch] in the consuming workspace when hacking on both.
+cuda-device = { git = "https://github.com/haixuanTao/cuda-oxide.git", rev = "8c3b5e2dabad165f0f82d98d72dcf2cd43c50d2d", optional = true }
 
 [lints]
 workspace = true
