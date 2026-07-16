@@ -8,26 +8,24 @@ pub fn workgroup_memory_barrier_with_group_sync() {
     {
         spirv_std::arch::workgroup_memory_barrier_with_group_sync();
     }
-    #[cfg(target_arch = "nvptx64")]
+    // cuda-oxide: `cuda_device::sync_threads` is recognized by name by the
+    // MIR importer on any compilation target and lowers to the convergent
+    // NVVM barrier op (`bar.sync`), which optimization passes will not
+    // tail-duplicate into divergent branches.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
     {
-        // Call the LLVM intrinsic directly instead of cuda_std::thread::sync_threads()
-        // so that LLVM sees the `convergent` attribute during optimization passes.
-        // Without this, LLVM tail-duplicates the barrier into both sides of divergent
-        // branches (if/else), causing threads to hit different bar.sync instructions
-        // and deadlocking the block.
-        // This fixes kernels with barriers that were otherwise hanging when using
-        // cuda_std::thread::sync_thread() instead.
-        unsafe extern "C" {
-            #[link_name = "llvm.nvvm.barrier0"]
-            fn nvvm_barrier0();
-        }
-        unsafe {
-            nvvm_barrier0();
-        }
-        //     cuda_std::thread::sync_threads();
+        cuda_device::sync_threads();
+    }
+    #[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
+    {
+        cuda_std::thread::sync_threads();
     }
 
-    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+    #[cfg(not(any(
+        target_arch = "spirv",
+        target_arch = "nvptx64",
+        feature = "cuda-oxide"
+    )))]
     #[cfg(feature = "cpu")]
     {
         crate::arch::cpu::barrier_wait();

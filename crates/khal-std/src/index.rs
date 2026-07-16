@@ -17,9 +17,9 @@ pub trait MaybeIndexUnchecked<T> {
 impl<T: Copy> MaybeIndexUnchecked<T> for [T] {
     #[inline(always)]
     fn at(&self, id: usize) -> &T {
-        #[cfg(all(feature = "unsafe_remove_boundchecks", target_arch = "nvptx64"))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", any(target_arch = "nvptx64", feature = "cuda-oxide")))]
         return unsafe { self.get_unchecked(id) };
-        #[cfg(all(feature = "unsafe_remove_boundchecks", not(target_arch = "nvptx64")))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", not(any(target_arch = "nvptx64", feature = "cuda-oxide"))))]
         return unsafe {
             use spirv_std::arch::IndexUnchecked;
             self.index_unchecked(id)
@@ -30,9 +30,9 @@ impl<T: Copy> MaybeIndexUnchecked<T> for [T] {
 
     #[inline(always)]
     fn at_mut(&mut self, id: usize) -> &mut T {
-        #[cfg(all(feature = "unsafe_remove_boundchecks", target_arch = "nvptx64"))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", any(target_arch = "nvptx64", feature = "cuda-oxide")))]
         return unsafe { self.get_unchecked_mut(id) };
-        #[cfg(all(feature = "unsafe_remove_boundchecks", not(target_arch = "nvptx64")))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", not(any(target_arch = "nvptx64", feature = "cuda-oxide"))))]
         return unsafe {
             use spirv_std::arch::IndexUnchecked;
             self.index_unchecked_mut(id)
@@ -55,9 +55,9 @@ impl<T: Copy> MaybeIndexUnchecked<T> for [T] {
 impl<T: Copy, const N: usize> MaybeIndexUnchecked<T> for [T; N] {
     #[inline(always)]
     fn at(&self, id: usize) -> &T {
-        #[cfg(all(feature = "unsafe_remove_boundchecks", target_arch = "nvptx64"))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", any(target_arch = "nvptx64", feature = "cuda-oxide")))]
         return unsafe { self.get_unchecked(id) };
-        #[cfg(all(feature = "unsafe_remove_boundchecks", not(target_arch = "nvptx64")))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", not(any(target_arch = "nvptx64", feature = "cuda-oxide"))))]
         return unsafe {
             use spirv_std::arch::IndexUnchecked;
             self.index_unchecked(id)
@@ -68,9 +68,9 @@ impl<T: Copy, const N: usize> MaybeIndexUnchecked<T> for [T; N] {
 
     #[inline(always)]
     fn at_mut(&mut self, id: usize) -> &mut T {
-        #[cfg(all(feature = "unsafe_remove_boundchecks", target_arch = "nvptx64"))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", any(target_arch = "nvptx64", feature = "cuda-oxide")))]
         return unsafe { self.get_unchecked_mut(id) };
-        #[cfg(all(feature = "unsafe_remove_boundchecks", not(target_arch = "nvptx64")))]
+        #[cfg(all(feature = "unsafe_remove_boundchecks", not(any(target_arch = "nvptx64", feature = "cuda-oxide"))))]
         return unsafe {
             use spirv_std::arch::IndexUnchecked;
             self.index_unchecked_mut(id)

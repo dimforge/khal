@@ -57,10 +57,104 @@ impl GpuBackend {
         }
     }
 
-    /// Returns `true` if this is the CUDA backend.
-    #[cfg(feature = "cuda")]
+    /// Returns `true` if this is the CUDA backend. Always available (returns
+    /// `false` when the `cuda` feature is disabled) so callers need not gate.
     pub fn is_cuda(&self) -> bool {
-        matches!(self, Self::Cuda(..))
+        #[cfg(feature = "cuda")]
+        {
+            matches!(self, Self::Cuda(..))
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            false
+        }
+    }
+
+    /// Auto-selects a backend: native CUDA on a Blackwell (sm_120+) device when
+    /// the `cuda` feature is compiled, else WebGPU. Override with
+    /// `KHAL_BACKEND=cuda|webgpu`.
+    pub async fn auto(features: wgpu::Features, limits: wgpu::Limits) -> anyhow::Result<Self> {
+        // Resolve any explicit override: Some(true)=force CUDA, Some(false)=force
+        // WebGPU, None=auto-detect.
+        let want_cuda = match std::env::var("KHAL_BACKEND").ok().as_deref() {
+            Some("cuda") | Some("CUDA") => Some(true),
+            Some("webgpu") | Some("WebGpu") | Some("wgpu") => Some(false),
+            Some(other) => {
+                eprintln!("[khal] unknown KHAL_BACKEND={other:?}; auto-detecting");
+                None
+            }
+            None => {
+                if std::env::var("BIPED_CUDA").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[khal] BIPED_CUDA=1 is deprecated; use KHAL_BACKEND=cuda (treating as such)"
+                    );
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if want_cuda == Some(false) {
+            eprintln!("[khal] backend = WebGPU");
+            return Ok(Self::WebGpu(WebGpu::new(features, limits).await?));
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            match Cuda::new(0) {
+                Ok(cuda) => {
+                    let cc = cuda.compute_capability().ok();
+                    let is_blackwell = matches!(cc, Some((maj, _)) if maj >= 12);
+                    if want_cuda == Some(true) || is_blackwell {
+                        match cc {
+                            Some((maj, min)) => {
+                                eprintln!("[khal] backend = native CUDA (sm_{maj}{min})")
+                            }
+                            None => eprintln!("[khal] backend = native CUDA"),
+                        }
+                        return Ok(Self::Cuda(cuda));
+                    }
+                    if let Some((maj, min)) = cc {
+                        eprintln!("[khal] CUDA device sm_{maj}{min} < sm_120; using WebGPU");
+                    }
+                }
+                Err(e) => {
+                    // Explicitly requested but unavailable -> surface the error.
+                    if want_cuda == Some(true) {
+                        return Err(e.into());
+                    }
+                    // Auto-detect: fall back, but never silently — a CUDA init
+                    // failure on a machine with an NVIDIA GPU is usually real
+                    // breakage (driver mismatch, exhausted contexts), and a
+                    // quiet WebGPU run hides it behind a slower working one.
+                    eprintln!("[khal] CUDA unavailable ({e}); using WebGPU");
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            if want_cuda == Some(true) {
+                // An explicit KHAL_BACKEND=cuda must not silently run on a
+                // different backend: results/performance would differ from
+                // what the user asked to measure.
+                anyhow::bail!(
+                    "KHAL_BACKEND=cuda but this binary was built without the `cuda` feature (rebuild with `--features cuda_backend` / `khal/cuda`)"
+                );
+            }
+            // Auto-detect on a machine that visibly has an NVIDIA GPU: still
+            // use WebGPU (only backend compiled in), but say what a cuda-less
+            // binary is leaving on the table — a stale or misbuilt binary
+            // otherwise degrades silently.
+            if std::path::Path::new("/dev/nvidiactl").exists() {
+                eprintln!(
+                    "[khal] NVIDIA GPU present but this binary was built without the `cuda` feature; using WebGPU"
+                );
+            }
+        }
+
+        eprintln!("[khal] backend = WebGPU");
+        Ok(Self::WebGpu(WebGpu::new(features, limits).await?))
     }
 
     /// Returns `true` if this is the Metal backend.
@@ -1084,6 +1178,14 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
 }
 
 impl Backend for GpuBackend {
+    #[cfg(feature = "cuda")]
+    fn as_cuda(&self) -> Option<&super::cuda::Cuda> {
+        match self {
+            Self::Cuda(c) => Some(c),
+            _ => None,
+        }
+    }
+
     const NAME: &'static str = "any";
     const TARGET: super::CompileTarget = super::CompileTarget::Wgsl;
 
@@ -1632,7 +1734,15 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBuffer<T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBuffer::Cuda(buffer), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, buffer.device_ptr_raw(), buffer.byte_len());
+                // cuda-oxide `&[T]` slice ABI wants an ELEMENT count, but byte_len is bytes;
+                // push element count so kernel `slice.len()` is correct (off-by-size_of
+                // otherwise -> OOB reads, e.g. gpu_init_sort_dispatch / lbvh). Arrays,
+                // scalars and uniforms ignore this value, so they are unaffected.
+                dispatch.set_arg(
+                    binding,
+                    buffer.device_ptr_raw(),
+                    buffer.byte_len() / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1664,7 +1774,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSlice<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSlice::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                dispatch.set_arg(
+                    binding,
+                    slice.offset_ptr(),
+                    slice.byte_len / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1701,7 +1815,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSliceMut<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSliceMut::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                dispatch.set_arg(
+                    binding,
+                    slice.offset_ptr(),
+                    slice.byte_len / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]

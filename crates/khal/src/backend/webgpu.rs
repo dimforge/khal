@@ -8,8 +8,9 @@ use bytemuck::{AnyBitPattern, NoUninit};
 use regex::Regex;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ops::RangeBounds;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "push_constants")]
 use wgpu::PushConstantRange;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
@@ -112,6 +113,14 @@ pub struct WebGpu {
     spirv_passthrough_enabled: bool,
     /// Whether `TIMESTAMP_QUERY` is supported on this device.
     timestamp_supported: bool,
+    /// Per-size pool of `MAP_READ | COPY_DST` staging buffers, reused across
+    /// `slow_read_buffer` calls so we don't pay a fresh `create_buffer` /
+    /// `MTLBuffer.makeBuffer` (and its inverse on drop) every call. Keyed by
+    /// buffer size in bytes. `Vec` per size so concurrent callers with the
+    /// same payload size each get an exclusive buffer. `Arc` so cloned
+    /// `WebGpu` handles (which already share the same underlying device /
+    /// queue via wgpu's internal Arcs) also share the pool.
+    read_staging_pool: Arc<Mutex<HashMap<u64, Vec<Buffer>>>>,
 }
 
 impl WebGpu {
@@ -193,6 +202,7 @@ impl WebGpu {
             hacks: vec![],
             spirv_passthrough_enabled,
             timestamp_supported,
+            read_staging_pool: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -215,7 +225,41 @@ impl WebGpu {
             hacks: vec![],
             spirv_passthrough_enabled,
             timestamp_supported,
+            read_staging_pool: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Pop a `MAP_READ | COPY_DST` staging buffer of exactly `bytes_len` bytes
+    /// from the readback pool, allocating one if the pool is empty for that
+    /// size. Pairs with [`release_read_staging`]. Used by [`slow_read_buffer`]
+    /// to avoid allocating a fresh GPU buffer (and freeing it) on every call.
+    fn acquire_read_staging(&self, bytes_len: u64) -> Buffer {
+        if let Some(buf) = self
+            .read_staging_pool
+            .lock()
+            .expect("read_staging_pool poisoned")
+            .get_mut(&bytes_len)
+            .and_then(|v| v.pop())
+        {
+            return buf;
+        }
+        self.device.create_buffer(&BufferDescriptor {
+            label: Some("khal-read-staging"),
+            size: bytes_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Return a staging buffer to the pool so the next `slow_read_buffer` of
+    /// the same size can reuse it. Caller must have already `unmap`ed it.
+    fn release_read_staging(&self, bytes_len: u64, buf: Buffer) {
+        self.read_staging_pool
+            .lock()
+            .expect("read_staging_pool poisoned")
+            .entry(bytes_len)
+            .or_default()
+            .push(buf);
     }
 
     /// Adds a regex-based text replacement to apply to WGSL source before compilation.
@@ -638,18 +682,25 @@ impl Backend for WebGpu {
         buffer: &Self::Buffer<T>,
         out: &mut [T],
     ) -> Result<(), Self::Error> {
-        // Create staging buffer.
-        let bytes_len = buffer.size() as usize;
-        let staging =
-            self.uninit_buffer::<u8>(bytes_len, BufferUsages::MAP_READ | BufferUsages::COPY_DST)?;
+        // Acquire (or allocate) a pooled staging buffer of the exact size.
+        // For a steady-state RL loop reading the same buffer every step this
+        // pool warms up after the first call and we stop paying the per-step
+        // `create_buffer` / drop round-trip (especially expensive on Metal
+        // where it's a fresh MTLBuffer allocation each time).
+        let bytes_len = buffer.size();
+        let staging = self.acquire_read_staging(bytes_len);
         let mut encoder = self.begin_encoding();
         encoder
             .encoder
-            .copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes_len as u64);
+            .copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes_len);
         self.submit(encoder)?;
 
-        // Read the buffer.
-        self.read_buffer(&staging, out).await
+        // `read_buffer` does the map_async + memcpy + unmap. After this call
+        // the staging buffer is back in `MAP_READ | COPY_DST` ready state and
+        // safe to return to the pool.
+        let result = self.read_buffer(&staging, out).await;
+        self.release_read_staging(bytes_len, staging);
+        result
     }
 }
 

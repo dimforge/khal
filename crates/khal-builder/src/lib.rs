@@ -93,7 +93,18 @@ impl KhalBuilder {
 
         self.setup_change_detection();
 
-        if self.build_spirv {
+        // Consumers embed this directory at compile time (e.g. vortx's
+        // `include_dir!("$OUT_DIR/shaders-spirv")`), so it must exist even when the
+        // SPIR-V build is skipped — otherwise the host crate fails to compile.
+        std::fs::create_dir_all(output_dir)
+            .unwrap_or_else(|e| panic!("failed to create shader output dir {output_dir:?}: {e}"));
+
+        // `KHAL_SKIP_SPIRV=1` skips the cargo-gpu SPIR-V compile entirely. This lets
+        // a CUDA-only build (shaders come from cuda-oxide PTX cubins) avoid the
+        // cargo-gpu toolchain as a build prerequisite. The WebGPU backend then has
+        // no embedded shaders and fails hard at runtime — intended on CUDA boxes.
+        let skip_spirv = std::env::var_os("KHAL_SKIP_SPIRV").is_some();
+        if self.build_spirv && !skip_spirv {
             self.build_spirv(output_dir);
         }
 
@@ -129,6 +140,7 @@ impl KhalBuilder {
 
         println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PUSH_CONSTANTS"); // TODO: currently unused
         println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CUDA");
+        println!("cargo:rerun-if-env-changed=KHAL_SKIP_SPIRV");
     }
 
     fn build_spirv(&self, output_dir: impl AsRef<Path>) {
@@ -163,9 +175,32 @@ impl KhalBuilder {
     }
 
     /// Compiles the shader crate to PTX for the CUDA backend.
+    ///
+    /// `CUDA_OXIDE_SHADERS_PTX_<SHADER_CRATE_NAME>` (upper-snake, e.g.
+    /// `CUDA_OXIDE_SHADERS_PTX_VORTX_SHADERS`) points at a prebuilt PTX/cubin;
+    /// when set it is embedded directly as `shaders.ptx` and the `cargo cuda`
+    /// (cuda-oxide) toolchain is not required.
     #[cfg(feature = "cuda")]
     fn build_ptx(&self, output_dir: impl AsRef<Path>) {
         let output_dir = output_dir.as_ref();
+
+        let crate_name = self
+            .shader_crate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_uppercase()
+            .replace('-', "_");
+        let env_key = format!("CUDA_OXIDE_SHADERS_PTX_{crate_name}");
+        println!("cargo:rerun-if-env-changed={env_key}");
+        if let Some(prebuilt) = std::env::var_os(&env_key) {
+            let dst = output_dir.join("shaders.ptx");
+            std::fs::copy(&prebuilt, &dst).unwrap_or_else(|e| {
+                panic!("failed to copy prebuilt PTX {prebuilt:?} ({env_key}) to {dst:?}: {e}")
+            });
+            return;
+        }
+
         let features_str = self.features.join(",");
 
         let mut args = vec![
