@@ -13,7 +13,14 @@ pub fn atomic_add_i32(ptr: &mut i32, value: i32) -> i32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicI32};
+        unsafe { DeviceAtomicI32::from_ptr(ptr) }.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicI32, Ordering};
         let atomic = unsafe { &*(ptr as *mut i32 as *const AtomicI32) };
@@ -32,7 +39,14 @@ pub fn atomic_add_u32(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
+        unsafe { DeviceAtomicU32::from_ptr(ptr) }.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -70,7 +84,14 @@ pub fn atomic_max_u32(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
+        unsafe { DeviceAtomicU32::from_ptr(ptr) }.fetch_max(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -89,7 +110,14 @@ pub fn atomic_min_u32(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
+        unsafe { DeviceAtomicU32::from_ptr(ptr) }.fetch_min(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -165,7 +193,14 @@ pub fn atomic_exchange_u32(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
+        unsafe { DeviceAtomicU32::from_ptr(ptr) }.swap(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -208,7 +243,14 @@ pub fn atomic_or_u32(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
+        unsafe { DeviceAtomicU32::from_ptr(ptr) }.fetch_or(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -227,7 +269,14 @@ pub fn atomic_and_u32(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, DeviceAtomicU32};
+        unsafe { DeviceAtomicU32::from_ptr(ptr) }.fetch_and(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -269,7 +318,14 @@ pub fn atomic_add_u32_workgroup(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, BlockAtomicU32};
+        unsafe { BlockAtomicU32::from_ptr(ptr) }.fetch_add(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
@@ -288,7 +344,14 @@ pub fn atomic_max_u32_workgroup(ptr: &mut u32, value: u32) -> u32 {
             { spirv_std::memory::Semantics::NONE.bits() },
         >(ptr, value)
     }
-    #[cfg(not(target_arch = "spirv"))]
+    // cuda-oxide: core RMW atomics lower to AtomicRmwOp which the legacy
+    // NVVM path rejects; cuda_device atomics lower to atom.* intrinsics.
+    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    {
+        use cuda_device::atomic::{AtomicOrdering, BlockAtomicU32};
+        unsafe { BlockAtomicU32::from_ptr(ptr) }.fetch_max(value, AtomicOrdering::Relaxed)
+    }
+    #[cfg(not(any(target_arch = "spirv", feature = "cuda-oxide")))]
     {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
