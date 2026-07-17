@@ -67,6 +67,19 @@ pub mod cuda_oxide_glue {
         #[inline(always)]
         fn at(&self, i: usize) -> &T { &self.0[i] }
     }
+    impl<T: 'static, const N: usize> core::ops::Index<usize> for SmemBuf<T, N> {
+        type Output = T;
+        #[inline(always)]
+        fn index(&self, i: usize) -> &T {
+            &self.0[i]
+        }
+    }
+    impl<T: 'static, const N: usize> core::ops::IndexMut<usize> for SmemBuf<T, N> {
+        #[inline(always)]
+        fn index_mut(&mut self, i: usize) -> &mut T {
+            &mut self.0[i]
+        }
+    }
 }
 
 #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
