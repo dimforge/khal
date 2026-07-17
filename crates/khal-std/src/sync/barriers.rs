@@ -12,7 +12,26 @@ pub fn workgroup_memory_barrier_with_group_sync() {
     // MIR importer on any compilation target and lowers to the convergent
     // NVVM barrier op (`bar.sync`), which optimization passes will not
     // tail-duplicate into divergent branches.
-    #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+    // Device build (cuda-oxide, real nvptx64 target): raw intrinsic extern —
+    // matched by name by both backend lines ("llvm.nvvm.barrier0").
+    #[cfg(all(feature = "cuda-oxide", target_arch = "nvptx64"))]
+    {
+        unsafe extern "C" {
+            #[link_name = "llvm.nvvm.barrier0"]
+            fn nvvm_barrier0();
+        }
+        unsafe {
+            nvvm_barrier0();
+        }
+    }
+    // Unified-compilation host build (cuda-oxide feature on a host target):
+    // the MIR importer intercepts this call by name; the host stub is never
+    // executed natively.
+    #[cfg(all(
+        feature = "cuda-oxide",
+        not(target_arch = "spirv"),
+        not(target_arch = "nvptx64")
+    ))]
     {
         cuda_device::sync_threads();
     }
