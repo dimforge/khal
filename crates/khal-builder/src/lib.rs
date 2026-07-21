@@ -194,6 +194,8 @@ impl KhalBuilder {
         let env_key = format!("CUDA_OXIDE_SHADERS_PTX_{crate_name}");
         println!("cargo:rerun-if-env-changed={env_key}");
         if let Some(prebuilt) = std::env::var_os(&env_key) {
+            // Re-embed when the prebuilt file itself changes, not only its path.
+            println!("cargo:rerun-if-changed={}", Path::new(&prebuilt).display());
             let dst = output_dir.join("shaders.ptx");
             std::fs::copy(&prebuilt, &dst).unwrap_or_else(|e| {
                 panic!("failed to copy prebuilt PTX {prebuilt:?} ({env_key}) to {dst:?}: {e}")
