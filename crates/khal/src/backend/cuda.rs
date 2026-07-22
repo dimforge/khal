@@ -114,6 +114,18 @@ impl Cuda {
             .stream
             .end_capture(no_flags)?
             .ok_or(CudaBackendError::CaptureFailed)?;
+        // Debug: dump the captured graph's node structure to a DOT file
+        // (KHAL_CUDA_GRAPH_DOT=/path/out.dot). Invaluable for diagnosing
+        // relaunch failures — e.g. a stray mem-alloc node makes cuGraphLaunch
+        // return CUDA_ERROR_INVALID_VALUE on every launch after the first.
+        if let Ok(path) = std::env::var("KHAL_CUDA_GRAPH_DOT") {
+            let cpath = std::ffi::CString::new(path).unwrap();
+            // 1 = CU_GRAPH_DEBUG_DOT_FLAGS_VERBOSE
+            let res = unsafe {
+                cudarc::driver::sys::cuGraphDebugDotPrint(graph.cu_graph(), cpath.as_ptr(), 1)
+            };
+            eprintln!("[khal-cuda] graph dot dump: {res:?}");
+        }
         Ok(CapturedGraph { graph })
     }
 }
@@ -491,6 +503,18 @@ impl Backend for Cuda {
             });
         }
         let bytes: &[u8] = bytemuck::cast_slice(data);
+        if std::env::var_os("KHAL_CUDA_ALLOC_TRACE").is_some()
+            && matches!(
+                self.stream.capture_status(),
+                Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE)
+            )
+        {
+            eprintln!(
+                "[khal-cuda] BUFFER_FROM_DATA DURING CAPTURE: {} bytes\n{}",
+                bytes.len(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let slice = self.stream.clone_htod(bytes)?;
         let raw_ptr = extract_raw_ptr(&slice, &self.stream);
         Ok(CudaBuffer {
@@ -517,6 +541,21 @@ impl Backend for Cuda {
             });
         }
         let byte_len = len * std::mem::size_of::<T>();
+        // Debug: catch capture-illegal allocations (KHAL_CUDA_ALLOC_TRACE=1).
+        // An allocation recorded while the stream is capturing becomes a
+        // MEM_ALLOC graph node, and a graph with un-freed alloc nodes cannot
+        // be relaunched (cuGraphLaunch -> CUDA_ERROR_INVALID_VALUE).
+        if std::env::var_os("KHAL_CUDA_ALLOC_TRACE").is_some()
+            && matches!(
+                self.stream.capture_status(),
+                Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE)
+            )
+        {
+            eprintln!(
+                "[khal-cuda] ALLOC DURING CAPTURE: {byte_len} bytes\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let slice = self.stream.alloc_zeros::<u8>(byte_len)?;
         let raw_ptr = extract_raw_ptr(&slice, &self.stream);
         Ok(CudaBuffer {
