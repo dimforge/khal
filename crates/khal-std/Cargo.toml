@@ -60,7 +60,7 @@ num-traits = { version = "0.2", default-features = false, features = ["libm"], o
 # portability the feature comment above promises. cuda-device is not published
 # on crates.io, so a git rev is the portable way to express it. Override with a
 # local checkout via [patch] in the consuming workspace when hacking on both.
-cuda-device = { git = "https://github.com/haixuanTao/cuda-oxide.git", rev = "8c3b5e2dabad165f0f82d98d72dcf2cd43c50d2d", optional = true }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "3655fa1246fb6c55c1d1ad0f3d2ce82e719ed8c3", optional = true }
 
 [lints]
 workspace = true
