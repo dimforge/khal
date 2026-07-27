@@ -28,16 +28,16 @@ unsafe_remove_boundchecks = []
 # --- nvptx64 device backend selection ---
 # `rust-cuda` (default): compile device code with Rust-CUDA's rustc_codegen_nvvm,
 # pulling `cuda_std` for thread/grid intrinsics and `GpuFloat` math.
-# `cuda-oxide`: compile device code with the cuda-oxide PTX backend instead.
-# cuda_std does not build under cuda-oxide's `-Zbuild-std`, so this path uses
-# khal_std's own `llvm.nvvm.*` intrinsic declarations (lowered by cuda-oxide)
-# and a libm-backed `Float`. Build shader crates with
-# `default-features = false, features = ["cuda-oxide", ...]`.
+# `cuda-oxide`: compile device code with the cuda-oxide backend instead.
+# Thread/grid/barrier primitives route through the `cuda_device` API, which
+# the cuda-oxide importer recognizes by name on ANY compilation target - so
+# shader crates build as ordinary host-target crates (unified interception)
+# with no nvptx64 cross-target step; `Float` is libm-backed. Build shader
+# crates with `default-features = false, features = ["cuda-oxide", ...]`.
 rust-cuda = ["dep:cuda_std"]
-# NOTE: the cuda-oxide backend (device-only nvptx build) also needs a
-# `cuda-device` dependency, but that crate lives in the cuda-oxide tree and is
-# only present on the build box; it is added there. This manifest keeps the
-# feature host-buildable everywhere else.
+# The `cuda-device` API-surface crate resolves from upstream NVlabs
+# cuda-oxide (git pin below); consuming workspaces may [patch] it to a local
+# checkout when hacking on both.
 cuda-oxide = ["dep:num-traits", "dep:cuda-device"]
 
 [dependencies]

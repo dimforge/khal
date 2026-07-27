@@ -1,5 +1,17 @@
 # Running rust-gpu `#[spirv]` shaders on native CUDA via cuda-oxide
 
+> **Status update (2026-07-27): the unified host-target path IS production.**
+> The device-target mode described in the update below lived on a cuda-oxide
+> fork; the fork is retired and shader crates now compile through **upstream
+> NVlabs cuda-oxide** on the host target (standard interception): the importer
+> recognizes the `cuda_device` API by name on any target, so the barrier and
+> sreg shims are gone — the remaining host-target requirement is building
+> glamx with `scalar-math` (no SSE paths in device code). Kernel entries are
+> emitted by `spirv_bindgen` with the reserved kernel-prefix marker. The
+> production chain (nexus + vortx -> sm_120 cubins) is
+> `zealot/scripts/full_unified_chain.sh`; validated physics-equivalent to the
+> device-mode builds it replaces (G1 standing gate + wall-time parity).
+>
 > Status: working prototype (2026-06-05). `gpu_add` and `gemm_tiled` run **bit-exact**
 > on the RTX 5090 (sm_120) through khal's CUDA backend, compiled by cuda-oxide.
 > A `#[spirv_kernel]` proc-macro auto-lowers the *verbatim* shader source.
