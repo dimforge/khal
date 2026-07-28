@@ -196,6 +196,8 @@ impl KhalBuilder {
         if let Some(prebuilt) = std::env::var_os(&env_key) {
             // Re-embed when the prebuilt file itself changes, not only its path.
             println!("cargo:rerun-if-changed={}", Path::new(&prebuilt).display());
+            std::fs::create_dir_all(output_dir)
+                .expect("failed to create shader output dir for the prebuilt cubin");
             let dst = output_dir.join("shaders.ptx");
             std::fs::copy(&prebuilt, &dst).unwrap_or_else(|e| {
                 panic!("failed to copy prebuilt PTX {prebuilt:?} ({env_key}) to {dst:?}: {e}")
