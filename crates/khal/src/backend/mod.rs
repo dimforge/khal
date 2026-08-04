@@ -17,7 +17,8 @@ pub enum CompileTarget {
 #[cfg(feature = "webgpu")]
 pub use webgpu::WebGpu;
 #[cfg(feature = "webgpu")]
-mod webgpu;
+#[cfg_attr(target_arch = "wasm32", allow(unused))]
+pub mod webgpu;
 
 #[cfg(feature = "cuda")]
 pub use cuda::Cuda;

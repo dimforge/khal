@@ -78,15 +78,32 @@ pub struct WebGpuFunction {
 }
 
 /// A WebGPU compute pass that carries its own device reference.
+///
+/// On wasm the pass may be a MERGED pass shared by successive `begin_pass`
+/// calls (see [`WebGpuEncoder::open_pass`]); dropping the handle then returns
+/// the underlying pass to the encoder's cache instead of ending it.
 pub struct WebGpuPass {
-    pub(crate) pass: ComputePass<'static>,
+    pub(crate) pass: Option<ComputePass<'static>>,
     pub(crate) device: Device,
+    /// wasm pass-merging: the encoder cache slot this pass returns to on drop
+    /// (`None` = plain pass, ends on drop as before).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) home: Option<std::rc::Rc<std::cell::RefCell<Option<ComputePass<'static>>>>>,
 }
 
 impl WebGpuPass {
     /// Begins a compute dispatch within this pass, binding the given function.
     pub fn begin_dispatch<'a>(&'a mut self, function: &'a WebGpuFunction) -> WebGpuDispatch<'a> {
-        WebGpuDispatch::new(&self.device, &mut self.pass, function)
+        WebGpuDispatch::new(&self.device, self.pass.as_mut().expect("pass ended"), function)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WebGpuPass {
+    fn drop(&mut self) {
+        if let Some(home) = self.home.take() {
+            *home.borrow_mut() = self.pass.take();
+        }
     }
 }
 
@@ -94,6 +111,51 @@ impl WebGpuPass {
 pub struct WebGpuEncoder {
     pub(crate) encoder: CommandEncoder,
     pub(crate) device: Device,
+    /// wasm pass-merging: the open compute pass shared by successive
+    /// `begin_pass` calls. The browser's WebGPU spec guarantees storage-write
+    /// visibility between dispatches within one pass, and a Metal pass switch
+    /// costs ~60 µs — per-kernel passes put a ~15 ms/step floor under the
+    /// browser physics demo (~206 passes/step); merging removes it. Closed
+    /// (ended) by buffer copies and at submit.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) open_pass: std::rc::Rc<std::cell::RefCell<Option<ComputePass<'static>>>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebGpuEncoder {
+    /// End the cached merged pass (if any) — required before encoder-level
+    /// commands (copies) and before `finish`.
+    fn close_open_pass(&mut self) {
+        drop(self.open_pass.borrow_mut().take());
+    }
+}
+
+/// wasm perf counters: every operation that crosses the wasm→browser GPU
+/// boundary, for the zealot demo's per-second HUD. Reading them answers
+/// "where do the crossings go" without a profiler build.
+#[cfg(target_arch = "wasm32")]
+pub mod perf_counters {
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    pub static SUBMITS: AtomicU32 = AtomicU32::new(0);
+    /// Compute passes actually OPENED (merged-cache hits don't count).
+    pub static PASSES: AtomicU32 = AtomicU32::new(0);
+    /// Encoder-level buffer copies — each one closes the merged pass.
+    pub static COPIES: AtomicU32 = AtomicU32::new(0);
+    /// queue.write_buffer uploads.
+    pub static WRITES: AtomicU32 = AtomicU32::new(0);
+    /// Buffer map requests (readbacks).
+    pub static MAPS: AtomicU32 = AtomicU32::new(0);
+
+    /// Take-and-zero all counters: (submits, passes, copies, writes, maps).
+    pub fn take() -> (u32, u32, u32, u32, u32) {
+        (
+            SUBMITS.swap(0, Relaxed),
+            PASSES.swap(0, Relaxed),
+            COPIES.swap(0, Relaxed),
+            WRITES.swap(0, Relaxed),
+            MAPS.swap(0, Relaxed),
+        )
+    }
 }
 
 /// Helper struct to initialize a device and its queue.
@@ -619,6 +681,8 @@ impl Backend for WebGpu {
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor::default()),
             device: self.device.clone(),
+            #[cfg(target_arch = "wasm32")]
+            open_pass: Default::default(),
         }
     }
 
@@ -631,6 +695,12 @@ impl Backend for WebGpu {
     }
 
     fn submit(&self, encoder: Self::Encoder) -> Result<(), Self::Error> {
+        #[cfg(target_arch = "wasm32")]
+        let mut encoder = encoder;
+        #[cfg(target_arch = "wasm32")]
+        encoder.close_open_pass();
+        #[cfg(target_arch = "wasm32")]
+        perf_counters::SUBMITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let _ = self.queue.submit(Some(encoder.encoder.finish()));
         Ok(())
     }
@@ -686,6 +756,8 @@ impl Backend for WebGpu {
         offset: u64,
         data: &[T],
     ) -> Result<(), Self::Error> {
+        #[cfg(target_arch = "wasm32")]
+        perf_counters::WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let elt_sz = std::mem::size_of::<T>() as u64;
         self.queue
             .write_buffer(buffer, offset * elt_sz, bytemuck::cast_slice(data));
@@ -767,6 +839,7 @@ impl Encoder<WebGpu> for WebGpuEncoder {
             timestamp_writes: None,
         };
 
+        let mut wants_timestamps = false;
         if let Some(timestamps) = timestamps
             && let Some((begin_idx, end_idx)) = timestamps.alloc_timestamp_pair(label.to_string())
         {
@@ -775,11 +848,35 @@ impl Encoder<WebGpu> for WebGpuEncoder {
                 beginning_of_pass_write_index: Some(begin_idx),
                 end_of_pass_write_index: Some(end_idx),
             });
+            wants_timestamps = true;
         }
 
+        // wasm pass-merging: reuse the cached open pass (per-pass timestamps
+        // force a dedicated pass, so those bypass the cache).
+        #[cfg(target_arch = "wasm32")]
+        if !wants_timestamps {
+            let cached = self.open_pass.borrow_mut().take();
+            let pass = cached.unwrap_or_else(|| {
+                perf_counters::PASSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                self.encoder.begin_compute_pass(&desc).forget_lifetime()
+            });
+            return WebGpuPass {
+                pass: Some(pass),
+                device: self.device.clone(),
+                home: Some(self.open_pass.clone()),
+            };
+        }
+        #[cfg(target_arch = "wasm32")]
+        if wants_timestamps {
+            self.close_open_pass();
+        }
+        let _ = wants_timestamps;
+
         WebGpuPass {
-            pass: self.encoder.begin_compute_pass(&desc).forget_lifetime(),
+            pass: Some(self.encoder.begin_compute_pass(&desc).forget_lifetime()),
             device: self.device.clone(),
+            #[cfg(target_arch = "wasm32")]
+            home: None,
         }
     }
 
@@ -791,6 +888,11 @@ impl Encoder<WebGpu> for WebGpuEncoder {
         target_offset: usize,
         copy_len: usize,
     ) -> Result<(), WebGpuBackendError> {
+        // Copies are encoder-level commands: the merged pass must end first.
+        #[cfg(target_arch = "wasm32")]
+        self.close_open_pass();
+        #[cfg(target_arch = "wasm32")]
+        perf_counters::COPIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         wgpu::CommandEncoder::copy_buffer_to_buffer(
             &mut self.encoder,
             source,
@@ -976,6 +1078,8 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (sender, receiver) = async_channel::bounded(1);
+        #[cfg(target_arch = "wasm32")]
+        { perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             sender.send_blocking(v).unwrap()
         });
@@ -989,6 +1093,8 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
     #[cfg(target_arch = "wasm32")]
     {
         let (sender, receiver) = async_channel::bounded(1);
+        #[cfg(target_arch = "wasm32")]
+        { perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             let _ = sender.force_send(v).unwrap();
         });
