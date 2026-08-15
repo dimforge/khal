@@ -2,6 +2,13 @@
 
 _Disclaimer: this changelog is updated using generative AI, but is still verified manually._
 
+## v0.3.0
+
+### Changed
+- Bumped `wgpu` and `naga` to `30`, `metal` to `0.33`, `syn` to `3`, and `darling` to `0.24`.
+- `WebGpuBackendError` gained a `MapRange` variant, since wgpu 30 made `BufferSlice::get_mapped_range` fallible. The two readback paths that can't propagate an error (`GpuReadback::try_take`, `GpuTimestamps::try_take`) report no result instead of copying, matching how they already handle a failed map.
+- The `push_constants` feature is now built on wgpu 30's renamed "immediates" API. No khal-level API change.
+
 ## v0.2.1
 
 ### Added

@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive", "extern_crate_std"] }
