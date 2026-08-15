@@ -674,6 +674,10 @@ impl Backend for Metal {
             bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
             zero_initialize_workgroup_memory: false,
             force_loop_bounding: false,
+            task_dispatch_limits: None,
+            mesh_shader_primitive_indices_clamp: true,
+            ray_query_initialization_tracking: true,
+            emit_int_div_checks: true,
         };
 
         let pipeline_options = naga::back::msl::PipelineOptions {
@@ -681,6 +685,7 @@ impl Backend for Metal {
             allow_and_force_point_size: false,
             vertex_pulling_transform: false,
             vertex_buffer_mappings: vec![],
+            binding_array_length_map: Default::default(),
         };
 
         let mut msl = String::new();

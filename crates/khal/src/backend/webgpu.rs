@@ -10,8 +10,6 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-#[cfg(feature = "push_constants")]
-use wgpu::PushConstantRange;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::CommandEncoderDescriptor;
 use wgpu::{
@@ -53,7 +51,7 @@ impl<'a> WebGpuBufferSlice<'a> {
 
 impl<'a> From<WebGpuBufferSlice<'a>> for wgpu::BindingResource<'a> {
     fn from(slice: WebGpuBufferSlice<'a>) -> Self {
-        slice.inner.into()
+        wgpu::BindingResource::try_from(slice.inner).expect("buffer slice can not be empty")
     }
 }
 
@@ -136,9 +134,9 @@ impl WebGpu {
             .map_err(|_| anyhow::anyhow!("Failed to initialize gpu adapter."))?;
         #[cfg(feature = "push_constants")]
         {
-            features = features | wgpu::Features::PUSH_CONSTANTS | wgpu::Features::SUBGROUP;
+            features = features | wgpu::Features::IMMEDIATES | wgpu::Features::SUBGROUP;
             // 128 bytes is the guaranteed minimum on Vulkan.
-            limits.max_push_constant_size = 128;
+            limits.max_immediate_size = 128;
         }
         #[cfg(feature = "subgroup_ops")]
         {
@@ -322,6 +320,8 @@ pub enum WebGpuBackendError {
     DevicePoll(#[from] PollError),
     #[error(transparent)]
     Recv(#[from] RecvError),
+    #[error(transparent)]
+    MapRange(#[from] wgpu::MapRangeError),
     #[error("Failed to parse SPIR-V: {0}")]
     SpirVParse(String),
     #[error("Naga validation failed: {0}")]
@@ -454,16 +454,6 @@ impl Backend for WebGpu {
         // Create pipeline layout if we have explicit bind group layouts
         let (shader_module, pipeline_layout) = if !bind_group_layouts.is_empty() {
             let layout_refs: Vec<_> = bind_group_layouts.iter().map(Some).collect();
-
-            #[cfg(feature = "push_constants")]
-            let push_constant_ranges: Vec<PushConstantRange> = if push_constant_size > 0 {
-                vec![PushConstantRange {
-                    stages: ShaderStages::COMPUTE,
-                    range: 0..push_constant_size,
-                }]
-            } else {
-                vec![]
-            };
 
             let layout = self
                 .device
@@ -718,7 +708,7 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
         // Set push constants if enabled and data is present.
         #[cfg(feature = "push_constants")]
         if !self.push_constants.is_empty() {
-            self.pass.set_push_constants(0, &self.push_constants);
+            self.pass.set_immediates(0, &self.push_constants);
         }
 
         // Group bindings by descriptor set (space) and create bind groups.
@@ -732,7 +722,7 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
                     .filter(|(binding, _)| binding.space == space as u32)
                     .map(|(binding, input)| wgpu::BindGroupEntry {
                         binding: binding.index,
-                        resource: input.inner.into(),
+                        resource: (*input).into(),
                     })
                     .collect();
 
@@ -757,7 +747,7 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
                     .filter(|(binding, _)| binding.space == space)
                     .map(|(binding, input)| wgpu::BindGroupEntry {
                         binding: binding.index,
-                        resource: input.inner.into(),
+                        resource: (*input).into(),
                     })
                     .collect();
 
@@ -889,7 +879,7 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
         receiver.recv().await?.unwrap();
     }
 
-    let data = buffer_slice.get_mapped_range();
+    let data = buffer_slice.get_mapped_range()?;
     Ok(data)
 }
 
@@ -1053,7 +1043,9 @@ impl WebGpuTimestamps {
                 .await
                 .map_err(WebGpuBackendError::from)?
                 .unwrap();
-            let data = buffer_slice.get_mapped_range();
+            let data = buffer_slice
+                .get_mapped_range()
+                .map_err(WebGpuBackendError::from)?;
             let bytes = &*data;
             // SAFETY: u64 is AnyBitPattern and we ensured the buffer is large enough.
             unsafe {
@@ -1109,7 +1101,10 @@ impl WebGpuTimestamps {
                 Ok(Ok(())) => {
                     let mut raw = vec![0u64; query_count as usize];
                     let buffer_slice = self.staging_buffer.slice(..);
-                    let data = buffer_slice.get_mapped_range();
+                    let Ok(data) = buffer_slice.get_mapped_range() else {
+                        self.staging_buffer.unmap();
+                        return Some(Vec::new());
+                    };
                     // SAFETY: u64 is AnyBitPattern; we copy at most the smaller
                     // of the mapped range and our destination.
                     unsafe {

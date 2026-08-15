@@ -19,7 +19,7 @@ cuda = []
 webgpu = []
 
 [dependencies]
-syn = "2.0.77"
+syn = "3.0.3"
 quote = "1.0.37"
 proc-macro2 = "1.0.86"
-darling = "0.20.10"
+darling = "0.24.0"

@@ -1064,17 +1064,18 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
             #[cfg(feature = "webgpu")]
             GpuBuffer::WebGpu(buffer) => {
                 let slice = buffer.slice(..);
-                let data = slice.get_mapped_range();
-                // SAFETY: T: AnyBitPattern; copy at most the smaller of the
-                // mapped range and the destination.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        out.as_mut_ptr() as *mut u8,
-                        data.len().min(n * std::mem::size_of::<T>()),
-                    );
+                if let Ok(data) = slice.get_mapped_range() {
+                    // SAFETY: T: AnyBitPattern; copy at most the smaller of the
+                    // mapped range and the destination.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            out.as_mut_ptr() as *mut u8,
+                            data.len().min(n * std::mem::size_of::<T>()),
+                        );
+                    }
+                    drop(data);
                 }
-                drop(data);
                 buffer.unmap();
             }
             #[allow(unreachable_patterns)]

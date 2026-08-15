@@ -20,7 +20,7 @@ thiserror = "2"
 
 # TODO: make the wgpu dependency optional too (all backends should be optional but with
 #       wgpu enabled by default).
-wgpu = { version = "29", features = ["naga-ir", "spirv"] }
+wgpu = { version = "30", features = ["naga-ir", "spirv"] }
 cudarc = { version = "0.19", features = ["driver", "nvrtc", "cuda-version-from-build-system"] }
 
 [workspace.lints]
