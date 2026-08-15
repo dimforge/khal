@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 smallvec = "1"
 include_dir = "0.7"
 
-khal-derive = { version = "0.2", path = "../khal-derive", optional = true }
+khal-derive = { version = "0.3", path = "../khal-derive", optional = true }
 cudarc = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]

@@ -29,7 +29,7 @@ glamx = { version = "0.3", default-features = false, features = ["nostd-libm", "
 rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
 spirv-std-macros = "0.10.0-alpha.1"
-khal-derive = { version = "0.2.0", path = "../khal-derive" }
+khal-derive = { version = "0.3.0", path = "../khal-derive" }
 
 [lints]
 workspace = true
@@ -39,4 +39,4 @@ spirv-std = "0.10.0-alpha.1"
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
 # Fixes the UVec3::element_product bug
-cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up" }
+#cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up" }
