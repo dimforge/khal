@@ -53,6 +53,13 @@ pub enum CudaBackendError {
     ShaderArg(#[from] ShaderArgsError),
     #[error("CUDA driver error: {0}")]
     Driver(#[from] driver::DriverError),
+    /// The requested kernel entry point was not found in the loaded module —
+    /// typically a stale prebuilt module or a shader/host build mismatch.
+    #[error("failed to load kernel entry point `{entry_point}`: {source}")]
+    LoadFunction {
+        entry_point: String,
+        source: driver::DriverError,
+    },
     #[error("Invalid PTX module")]
     InvalidPtx,
 }
@@ -318,7 +325,12 @@ impl Backend for Cuda {
         entry_point: &str,
         _push_constant_size: u32,
     ) -> Result<Self::Function, Self::Error> {
-        let func = module.inner.load_function(entry_point)?;
+        let func = module.inner.load_function(entry_point).map_err(|source| {
+            CudaBackendError::LoadFunction {
+                entry_point: entry_point.to_string(),
+                source,
+            }
+        })?;
         Ok(CudaFunction { func })
     }
 
