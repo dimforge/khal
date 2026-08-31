@@ -74,6 +74,25 @@ impl GpuBackend {
     /// the `cuda` feature is compiled, else WebGPU. Override with
     /// `KHAL_BACKEND=cuda|webgpu`.
     pub async fn auto(features: wgpu::Features, limits: wgpu::Limits) -> anyhow::Result<Self> {
+        // Explicit native-Metal request (macOS): bypasses wgpu entirely —
+        // same SPIR-V, same naga MSL translation, but no wgpu state
+        // tracking / implicit-barrier layer. Never auto-selected: the
+        // WebGPU path stays the default on Metal targets.
+        if matches!(
+            std::env::var("KHAL_BACKEND").ok().as_deref(),
+            Some("metal" | "Metal" | "msl")
+        ) {
+            #[cfg(feature = "metal")]
+            {
+                eprintln!("[khal] backend = native Metal");
+                return Ok(Self::Metal(Metal::new()?));
+            }
+            #[cfg(not(feature = "metal"))]
+            anyhow::bail!(
+                "KHAL_BACKEND=metal requested but khal was built without the \
+                 'metal' feature"
+            );
+        }
         // Resolve any explicit override: Some(true)=force CUDA, Some(false)=force
         // WebGPU, None=auto-detect.
         let want_cuda = match std::env::var("KHAL_BACKEND").ok().as_deref() {

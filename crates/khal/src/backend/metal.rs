@@ -42,6 +42,22 @@ pub struct Metal {
     /// Capabilities for GPU timestamp queries; `None` if the device or
     /// driver doesn't expose stage-boundary timestamp sampling.
     timing_caps: Option<Arc<MetalTimingCaps>>,
+    /// Set by `submit`, cleared by `synchronize`. While set, `write_buffer`
+    /// must not memcpy into shared memory directly — wgpu's
+    /// `queue.write_buffer` is ordered AFTER already-submitted work, and a
+    /// raw memcpy is not: host writes then race in-flight kernel reads of
+    /// the same buffer (observed: the zealot biped's staged per-env uploads
+    /// corrupting so every env ran the last env's robot). Instead, writes
+    /// while work may be in flight go through a staging buffer + a blit
+    /// command buffer committed to the queue — FIFO queue order gives
+    /// exactly wgpu's semantics with no CPU stall.
+    gpu_busy: Arc<AtomicBool>,
+    /// Open blit command buffer collecting the current write burst's staged
+    /// copies (see `gpu_busy`). Committed lazily by the next `submit` /
+    /// `synchronize`, so a burst of writes costs ONE command buffer, and
+    /// queue FIFO order still sequences it after in-flight work and before
+    /// the next compute submission.
+    pending_writes: Arc<Mutex<Option<(CommandBuffer, metal::BlitCommandEncoder)>>>,
 }
 
 // SAFETY: metal::Device and CommandQueue are thread-safe (MTLDevice/MTLCommandQueue
@@ -51,6 +67,15 @@ unsafe impl Send for Metal {}
 unsafe impl Sync for Metal {}
 
 impl Metal {
+    /// Commits the open write-burst blit command buffer, if any (see
+    /// `pending_writes`).
+    fn flush_pending_writes(&self) {
+        if let Some((cmd, blit)) = self.pending_writes.lock().unwrap().take() {
+            blit.end_encoding();
+            cmd.commit();
+        }
+    }
+
     /// Commits an empty command buffer with a completion handler that flips the
     /// returned flag once the GPU finishes it.
     ///
@@ -94,6 +119,8 @@ impl Metal {
         let timing_caps = detect_timing_caps(&device);
         Ok(Self {
             device,
+            gpu_busy: Arc::new(AtomicBool::new(false)),
+            pending_writes: Arc::new(Mutex::new(None)),
             queue,
             module_cache: Arc::new(Mutex::new(HashMap::new())),
             timing_caps,
@@ -537,6 +564,35 @@ impl Backend for Metal {
         )
         .map_err(|e| MetalBackendError::SpirVParse(format!("{e}")))?;
 
+        // Optional (KHAL_METAL_WGSL_ROUNDTRIP=1): normalize the IR through a
+        // WGSL round-trip before MSL generation — the shape the wgpu path
+        // effectively feeds the MSL writer. Debug lever for spv-in-shaped-IR
+        // miscompiles.
+        let module = if std::env::var("KHAL_METAL_WGSL_ROUNDTRIP").as_deref() == Ok("1") {
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .map_err(|e| MetalBackendError::SpirVParse(format!("pre-wgsl validate: {e:?}")))?;
+            let wgsl = naga::back::wgsl::write_string(
+                &module,
+                &info,
+                naga::back::wgsl::WriterFlags::empty(),
+            )
+            .map_err(|e| MetalBackendError::SpirVParse(format!("wgsl out: {e:?}")))?;
+            let mut rt = naga::front::wgsl::parse_str(&wgsl)
+                .map_err(|e| MetalBackendError::SpirVParse(format!("wgsl re-parse: {e}")))?;
+            // WGSL sanitizes `::` out of entry-point names — restore the
+            // originals so the per-entry-point resource map still keys.
+            for (ep, orig) in rt.entry_points.iter_mut().zip(module.entry_points.iter()) {
+                ep.name = orig.name.clone();
+            }
+            rt
+        } else {
+            module
+        };
+
         // Validate so the MSL backend has the type info it needs.
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
@@ -666,14 +722,34 @@ impl Backend for Metal {
         per_entry_point.insert(entry_point.to_string(), entry_point_resources);
 
         let options = naga::back::msl::Options {
-            lang_version: (2, 4),
+            // Metal 3: matches what wgpu targets on modern macOS. The 2.4
+            // target visibly miscompiled the fused multibody dynamics kernel
+            // (lane decode collapsed to the last slot) on M-series.
+            lang_version: (3, 0),
             per_entry_point_map: per_entry_point,
             inline_samplers: vec![],
             spirv_cross_compatibility: false,
             fake_missing_bindings: false,
-            bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
-            zero_initialize_workgroup_memory: false,
-            force_loop_bounding: false,
+            // Match wgpu's WebGPU semantics EXACTLY: OOB reads return zero
+            // and OOB writes are skipped (`ReadZeroSkipWrite`), and workgroup
+            // memory starts zeroed. This is load-bearing, not defensive: the
+            // physics kernels were written against wgpu and rely on
+            // zero-read/skip-write semantics for by-design out-of-bounds
+            // accesses (inactive lane slots, StepRng trailer threads). naga's
+            // default (`Unchecked`) is UB there, and `Restrict` deterministically
+            // clamps reads to the END of each buffer — every batch then
+            // computes from the LAST batch's slice (observed: all envs ran
+            // batch N-1's robot on Metal while WebGPU was correct).
+            bounds_check_policies: naga::proc::BoundsCheckPolicies {
+                index: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
+                buffer: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
+                ..naga::proc::BoundsCheckPolicies::default()
+            },
+            zero_initialize_workgroup_memory: true,
+            // wgpu enables loop bounding on Metal: Apple's compiler
+            // miscompiles potentially-unbounded loops (the trimesh BVH
+            // traversal visibly lost contacts without this).
+            force_loop_bounding: true,
             task_dispatch_limits: None,
             mesh_shader_primitive_indices_clamp: true,
             ray_query_initialization_tracking: true,
@@ -721,8 +797,12 @@ impl Backend for Metal {
             .map(|ep| ep.workgroup_size)
             .ok_or_else(|| MetalBackendError::EntryPointNotFound(entry_point.into()))?;
 
-        // Compile MSL.
+        // Compile MSL. Metal's compiler defaults to fast math, which drops
+        // NaN/Inf semantics and reassociates float ops — the physics kernels
+        // (and wgpu's Metal path, which this backend must agree with) need
+        // IEEE behavior, so disable it.
         let compile_options = metal::CompileOptions::new();
+        compile_options.set_fast_math_enabled(false);
         let library: Library = self
             .device
             .new_library_with_source(&msl, &compile_options)
@@ -740,6 +820,18 @@ impl Backend for Metal {
             .device
             .new_compute_pipeline_state(&descriptor)
             .map_err(MetalBackendError::PipelineCreate)?;
+
+        // Dispatching more threads per threadgroup than the pipeline's
+        // register-pressure-derived maximum is UNDEFINED BEHAVIOR on Metal —
+        // surface it loudly instead of silently corrupting.
+        let max_threads = pipeline.max_total_threads_per_threadgroup() as u32;
+        let wanted = workgroup_size[0] * workgroup_size[1] * workgroup_size[2];
+        if wanted > max_threads {
+            eprintln!(
+                "[khal-metal] WARNING: `{entry_point}` needs {wanted} threads/threadgroup \
+                 but the pipeline supports only {max_threads} — dispatches will misbehave"
+            );
+        }
 
         Ok(MetalFunction {
             pipeline,
@@ -779,6 +871,7 @@ impl Backend for Metal {
     }
 
     fn synchronize(&self) -> Result<(), Self::Error> {
+        self.flush_pending_writes();
         // Submit and wait on a fresh empty command buffer to flush the queue.
         let cb = self.queue.new_command_buffer();
         cb.commit();
@@ -787,7 +880,10 @@ impl Backend for Metal {
     }
 
     fn submit(&self, encoder: Self::Encoder) -> Result<(), Self::Error> {
+        // Write-burst blits must land BEFORE this submission's compute work.
+        self.flush_pending_writes();
         encoder.command_buffer.commit();
+        self.gpu_busy.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -831,6 +927,14 @@ impl Backend for Metal {
         let inner = self
             .device
             .new_buffer(byte_len as NSUInteger, resource_options(usage));
+        // WebGPU (and thus the wgpu backend) guarantees zero-initialized
+        // buffers; Metal leaves new-buffer contents undefined. The compute
+        // pipelines are written against wgpu and some state buffers rely on
+        // starting zeroed — match the semantics. Shared storage: memset on
+        // the CPU side is cheapest.
+        unsafe {
+            std::ptr::write_bytes(inner.contents() as *mut u8, 0, byte_len);
+        }
         Ok(MetalBuffer {
             inner,
             len,
@@ -850,6 +954,34 @@ impl Backend for Metal {
         let byte_offset = (offset as usize) * elt_size;
         let bytes: &[u8] = bytemuck::cast_slice(data);
         if bytes.is_empty() {
+            return Ok(());
+        }
+        // Order this write after all submitted GPU work (see `gpu_busy`):
+        // while kernels may be in flight, route the bytes through a staging
+        // buffer + a blit command buffer — the queue's FIFO order sequences
+        // it after the in-flight work and before later submits, exactly like
+        // wgpu's `queue.write_buffer`, with no CPU stall. The direct memcpy
+        // fast path only runs when nothing has been submitted since the last
+        // drain (scene setup, post-readback staging).
+        if self.gpu_busy.load(Ordering::Acquire) {
+            let staging = self.device.new_buffer_with_data(
+                bytes.as_ptr() as *const _,
+                bytes.len() as NSUInteger,
+                MTLResourceOptions::StorageModeShared,
+            );
+            let mut pending = self.pending_writes.lock().unwrap();
+            let (_, blit) = pending.get_or_insert_with(|| {
+                let cmd = self.queue.new_command_buffer().to_owned();
+                let blit = cmd.new_blit_command_encoder().to_owned();
+                (cmd, blit)
+            });
+            blit.copy_from_buffer(
+                &staging,
+                0,
+                &buffer.inner,
+                byte_offset as NSUInteger,
+                bytes.len() as NSUInteger,
+            );
             return Ok(());
         }
         // SAFETY: contents() is valid for the buffer's lifetime; we copy non-overlapping bytes.

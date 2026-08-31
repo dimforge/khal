@@ -7,6 +7,7 @@ publish = false
 [features]
 default = ["webgpu"]
 webgpu = [ "khal/webgpu" ]
+metal = [ "khal/metal" ]
 cpu = ["khal/cpu", "khal-example-shaders/cpu"]
 cpu-parallel = ["cpu", "khal-example-shaders/cpu-parallel"]
 cuda = ["khal/cuda", "khal-builder/cuda", "khal-example-shaders/cuda"]
