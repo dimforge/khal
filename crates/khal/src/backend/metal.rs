@@ -815,6 +815,11 @@ impl Backend for Metal {
         let descriptor = ComputePipelineDescriptor::new();
         descriptor.set_compute_function(Some(&function));
         descriptor.set_label(entry_point);
+        // All kernels declare 64-thread (2x SIMD-width) or wider groups and
+        // are dispatched at exactly that size — let Metal skip edge masking.
+        if workgroup_size[0] * workgroup_size[1] * workgroup_size[2] % 32 == 0 {
+            descriptor.set_thread_group_size_is_multiple_of_thread_execution_width(true);
+        }
 
         let pipeline = self
             .device
