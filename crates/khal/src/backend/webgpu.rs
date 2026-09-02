@@ -987,10 +987,21 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
             }
         }
 
+        // WebGPU caps each workgroup-grid dimension at 65535; wgpu's own
+        // validation error doesn't say WHICH dispatch — name it here.
+        let check_grid = |grid_dim: [u32; 3]| {
+            if grid_dim.iter().any(|&d| d > 65535) {
+                panic!(
+                    "dispatch grid {grid_dim:?} exceeds WebGPU's 65535 per-dimension \
+                     workgroup cap (a flattened dispatch that needs a 2D split?)"
+                );
+            }
+        };
         match grid.into() {
             DispatchGrid::Grid(grid_dim) => {
                 // NOTE: we don't need to queue if the workgroup is empty.
                 if grid_dim[0] * grid_dim[1] * grid_dim[2] > 0 {
+                    check_grid(grid_dim);
                     self.pass
                         .dispatch_workgroups(grid_dim[0], grid_dim[1], grid_dim[2]);
                 }
@@ -1002,6 +1013,7 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
                     threads[2].div_ceil(_block_dim[2]),
                 ];
                 if grid_dim[0] * grid_dim[1] * grid_dim[2] > 0 {
+                    check_grid(grid_dim);
                     self.pass
                         .dispatch_workgroups(grid_dim[0], grid_dim[1], grid_dim[2]);
                 }
