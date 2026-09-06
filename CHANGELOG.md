@@ -7,6 +7,9 @@ _Disclaimer: this changelog is updated using generative AI, but is still verifie
 ### Added
 - `atomic_sub_u32` in `khal-std`: atomic wrapping subtraction on a storage-buffer `u32`, returning the old value (`OpAtomicISub` on SPIR-V, `fetch_sub` elsewhere).
 
+### Fixed
+- WebGPU SPIR-V passthrough loading (`WebGpu::load_module_spirv_passthrough`) now declares the module's entry points (parsed from `OpEntryPoint`/`OpExecutionMode LocalSize`) in the wgpu passthrough descriptor. wgpu 30 validates compute pipelines against that list, so with it left empty every passthrough kernel failed to load on Vulkan with `Unable to find entry point`.
+
 ## v0.3.0
 
 ### Changed

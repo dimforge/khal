@@ -282,6 +282,10 @@ impl WebGpu {
         }
 
         let spirv = wgpu::util::make_spirv_raw(spirv_bytes);
+        // wgpu doesn't reflect passthrough modules, so it only knows the entry points we
+        // declare here. `create_compute_pipeline` then rejects any entry point missing
+        // from that list, so declare every entry point the module actually contains.
+        let entry_points = spirv_entry_points(&spirv);
 
         // SAFETY: the caller has marked this shader as requiring passthrough loading,
         // meaning it uses SPIR-V features not supported by naga. The SPIR-V bytecode
@@ -290,6 +294,7 @@ impl WebGpu {
             self.device
                 .create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                     spirv: Some(spirv),
+                    entry_points: Cow::Owned(entry_points),
                     ..Default::default()
                 })
         };
@@ -303,6 +308,67 @@ impl WebGpu {
         #[cfg(not(feature = "push_constants"))]
         Ok(shader_module)
     }
+}
+
+/// Lists the entry points declared by a SPIR-V module, with the workgroup size of each.
+///
+/// This reads the `OpEntryPoint` and `OpExecutionMode LocalSize` instructions directly
+/// from the SPIR-V words, without going through naga (passthrough modules are exactly the
+/// ones naga can't handle). Entry points without a `LocalSize` execution mode get a
+/// workgroup size of `(0, 0, 0)`; wgpu only uses that field on Metal anyway.
+fn spirv_entry_points(words: &[u32]) -> Vec<wgpu::PassthroughShaderEntryPoint<'static>> {
+    const HEADER_LEN: usize = 5;
+    const OP_ENTRY_POINT: u32 = 15;
+    const OP_EXECUTION_MODE: u32 = 16;
+    const EXECUTION_MODE_LOCAL_SIZE: u32 = 17;
+
+    // (function id, name)
+    let mut entry_points: Vec<(u32, String)> = Vec::new();
+    // (function id, workgroup size)
+    let mut local_sizes: Vec<(u32, (u32, u32, u32))> = Vec::new();
+
+    let mut i = HEADER_LEN;
+    while i < words.len() {
+        let word_count = (words[i] >> 16) as usize;
+        let opcode = words[i] & 0xffff;
+        if word_count == 0 {
+            break; // Malformed module; stop rather than loop forever.
+        }
+        let end = (i + word_count).min(words.len());
+
+        match opcode {
+            // OpEntryPoint: execution model, function id, literal name, interface ids...
+            OP_ENTRY_POINT if word_count >= 4 => {
+                let function_id = words[i + 2];
+                let bytes: Vec<u8> = words[i + 3..end]
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .collect();
+                let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                let name = String::from_utf8_lossy(&bytes[..len]).into_owned();
+                entry_points.push((function_id, name));
+            }
+            // OpExecutionMode: function id, mode, literals... (LocalSize has x, y, z)
+            OP_EXECUTION_MODE if word_count >= 6 && words[i + 2] == EXECUTION_MODE_LOCAL_SIZE => {
+                local_sizes.push((words[i + 1], (words[i + 3], words[i + 4], words[i + 5])));
+            }
+            _ => {}
+        }
+
+        i = end;
+    }
+
+    entry_points
+        .into_iter()
+        .map(|(function_id, name)| wgpu::PassthroughShaderEntryPoint {
+            name: Cow::Owned(name),
+            workgroup_size: local_sizes
+                .iter()
+                .find(|(id, _)| *id == function_id)
+                .map(|(_, size)| *size)
+                .unwrap_or((0, 0, 0)),
+        })
+        .collect()
 }
 
 /// Errors specific to the WebGPU backend.
