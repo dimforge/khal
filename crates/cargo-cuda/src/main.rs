@@ -190,6 +190,13 @@ components = ["llvm-tools-preview", "rust-src", "rustc-dev"]
 
     if !status.success() {
         eprintln!("Failed to build rustc_codegen_nvvm");
+        eprintln!();
+        eprintln!("rustc_codegen_nvvm has native build requirements beyond the CUDA toolkit:");
+        eprintln!("  - LLVM 7.1.0 (libNVVM only accepts LLVM 7 bitcode). Rust-CUDA ships no");
+        eprintln!("    prebuilt LLVM for Linux, so build it from source and set");
+        eprintln!("    LLVM_CONFIG=/path/to/llvm-7/bin/llvm-config (see the khal README).");
+        eprintln!("  - pkg-config + OpenSSL headers (openssl-sys), e.g. `pkg-config libssl-dev`.");
+        eprintln!("  - libclang with its resource headers for bindgen, e.g. `libclang-common-<N>-dev`.");
         std::process::exit(1);
     }
 

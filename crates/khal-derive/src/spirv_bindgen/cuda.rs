@@ -5,7 +5,9 @@ use super::{BuiltinKind, OriginalParam, OriginalParamKind, ShaderBinding, is_sli
 /// Generate the CUDA (nvptx64) kernel entry point.
 ///
 /// This function:
-/// 1. Receives raw device pointers + byte lengths as u64 parameters
+/// 1. Receives raw device pointers + element counts as u64 parameters
+///    (the host's `CudaDispatch` pushes `byte_len / size_of::<T>()` for slice
+///    bindings, the same `(ptr, len)` ABI cuda-oxide's `&[T]` params use)
 /// 2. Computes builtin values from CUDA thread/block indices
 /// 3. Reconstructs slices from raw pointers
 /// 4. Calls the original shader function
@@ -20,7 +22,7 @@ pub(super) fn generate_cuda_entry_block(
     let wg_y = workgroup_size[1];
 
     // Generate kernel parameters: for each binding (sorted by set/index),
-    // storage buffers become (ptr: u64, byte_len: u64), uniforms become (ptr: u64).
+    // storage buffers become (ptr: u64, len: u64), uniforms become (ptr: u64).
     let mut cuda_params = Vec::new();
     let mut cuda_body = Vec::new();
     let mut cuda_call_args = Vec::new();
@@ -59,7 +61,7 @@ pub(super) fn generate_cuda_entry_block(
     for param in &sorted_bindings {
         let name = &param.name;
         let ptr_name = syn::Ident::new(&format!("{}_ptr", name), name.span());
-        let len_name = syn::Ident::new(&format!("{}_byte_len", name), name.span());
+        let len_name = syn::Ident::new(&format!("{}_len", name), name.span());
 
         if let OriginalParamKind::Binding {
             is_uniform,
@@ -125,7 +127,7 @@ pub(super) fn generate_cuda_entry_block(
                 is_mutable,
             } => {
                 let ptr_name = syn::Ident::new(&format!("{}_ptr", name), name.span());
-                let len_name = syn::Ident::new(&format!("{}_byte_len", name), name.span());
+                let len_name = syn::Ident::new(&format!("{}_len", name), name.span());
                 let is_slice = is_slice_reference(&param.ty);
 
                 let elem_ty = if let syn::Type::Reference(ref_type) = &param.ty {
@@ -149,7 +151,7 @@ pub(super) fn generate_cuda_entry_block(
                             let #name = unsafe {
                                 core::slice::from_raw_parts_mut(
                                     #ptr_name as *mut #elem_ty,
-                                    #len_name as usize / core::mem::size_of::<#elem_ty>(),
+                                    #len_name as usize,
                                 )
                             };
                         },
@@ -166,7 +168,7 @@ pub(super) fn generate_cuda_entry_block(
                             let #name = unsafe {
                                 core::slice::from_raw_parts(
                                     #ptr_name as *const #elem_ty,
-                                    #len_name as usize / core::mem::size_of::<#elem_ty>(),
+                                    #len_name as usize,
                                 )
                             };
                         },
@@ -275,7 +277,7 @@ pub(super) fn generate_cuda_oxide_entry_block(
             .map(|b| (b.descriptor_set, b.binding))
             .unwrap_or((0, 0))
     });
-    // The host (khal CudaDispatch) pushes a `(ptr, byte_len)` pair for EVERY
+    // The host (khal CudaDispatch) pushes a `(ptr, len)` pair for EVERY
     // storage binding. A `&[T]`/`&mut [T]` typed param already lowers to that
     // 2-arg ABI, but a sized-array ref `&[T; N]`/`&mut [T; N]` lowers to a single
     // thin pointer — so the kernel would consume one fewer arg than the host
@@ -291,7 +293,7 @@ pub(super) fn generate_cuda_oxide_entry_block(
             let ty = &p.ty;
             // Uniform bindings are pushed by the host as a single pointer, so keep
             // them typed (thin pointer ABI). Storage bindings are pushed as a
-            // `(ptr, byte_len)` pair: slice refs already match that 2-arg ABI, but
+            // `(ptr, len)` pair: slice refs already match that 2-arg ABI, but
             // sized-array refs (`&[T; N]`) and scalar refs (`&T`) lower to a single
             // thin pointer and would under-consume the host's args, shifting every
             // later binding. Receive those as slices and reconstruct the original
@@ -392,23 +394,25 @@ pub(super) fn generate_cuda_oxide_entry_block(
                     syn::Ident::new(&format!("__smem_{}", name), name.span());
                 match &p.ty {
                     syn::Type::Reference(r) => match &*r.elem {
-                        // `&mut [f32; N]` shared tile -> `&mut SmemBuf` (direct
-                        // `SharedArray` indexing -> st.shared). Body indexes it via
-                        // MaybeIndexUnchecked and can reborrow it across helpers
-                        // generic over `&mut impl MaybeIndexUnchecked<f32>`.
+                        // `&mut [f32; N]` shared tile -> a real `&mut [f32; N]` into
+                        // the `SharedArray`'s storage, so the body can index it,
+                        // call MaybeIndexUnchecked on it AND pass it verbatim to
+                        // helpers typed `&mut [T; N]` (e.g. vortx's tree reductions).
+                        // `SharedArray::as_mut_ptr` is intercepted by the cuda-oxide
+                        // importer and yields a generic pointer to shared memory
+                        // (cvta.shared), so accesses through the reference are
+                        // ordinary generic loads/stores on shared memory.
                         syn::Type::Array(arr) => {
                             let elem_ty = &*arr.elem;
                             let len_expr = &arr.len;
-                            let sb_name =
-                                syn::Ident::new(&format!("__smembuf_{}", name), name.span());
                             preludes.push(quote! {
                                 static mut #static_name:
                                     khal_std::cuda_oxide_glue::SharedArray<#elem_ty, { #len_expr }> =
                                     khal_std::cuda_oxide_glue::SharedArray::UNINIT;
-                                let mut #sb_name = khal_std::cuda_oxide_glue::SmemBuf(
-                                    unsafe { &mut *core::ptr::addr_of_mut!(#static_name) }
-                                );
-                                let #name = &mut #sb_name;
+                                let #name: &mut [#elem_ty; #len_expr] = unsafe {
+                                    &mut *((&mut *core::ptr::addr_of_mut!(#static_name)).as_mut_ptr()
+                                        as *mut [#elem_ty; #len_expr])
+                                };
                             });
                         }
                         // `&mut T` scalar broadcast slot -> `SharedArray<T,1>` ->
@@ -437,19 +441,35 @@ pub(super) fn generate_cuda_oxide_entry_block(
     let body = &func.block;
 
     // Name the entry with cuda-oxide's reserved kernel prefix directly
-    // (`cuda_oxide_kernel_246e25db_<entry>`) instead of going through the
-    // `#[kernel]` proc-macro: the collector roots kernels by that def-path
-    // marker and the PTX entry keeps the unprefixed base name, while the
-    // macro's host-side glue (a `cuda_host::CudaKernel` marker impl) would
-    // drag a cuda-host dependency into pure shader crates. Feature-gated,
-    // not target-gated: with the cuda-oxide backend installed the crate is
-    // compiled on the HOST target (unified interception) or for nvptx64
-    // (device-only builds) — the entry is generated identically for both.
+    // (`KERNEL_PREFIX` in cuda-oxide's `reserved-oxide-symbols`, currently
+    // `cuda_oxide_codegen_v1_cuda_oxide_kernel_246e25db_<entry>`) instead of
+    // going through the `#[kernel]` proc-macro: the collector roots kernels by
+    // that def-path marker and the PTX entry keeps the unprefixed base name,
+    // while the macro's host-side glue (a `cuda_host::CudaKernel` marker impl)
+    // would drag a cuda-host dependency into pure shader crates. The prefix
+    // must track cuda-oxide's: the backend rejects roots using an older
+    // prefix (e.g. the pre-"scoped cache protocol" `cuda_oxide_kernel_246e25db_`)
+    // with an explicit diagnostic. Feature-gated, not target-gated: with the
+    // cuda-oxide backend installed the crate is compiled on the HOST target
+    // (unified interception) or for nvptx64 (device-only builds) — the entry
+    // is generated identically for both.
     let prefixed_entry_ident = syn::Ident::new(
-        &format!("cuda_oxide_kernel_246e25db_{}", cuda_entry_ident),
+        &format!("{CUDA_OXIDE_KERNEL_PREFIX}{cuda_entry_ident}"),
         cuda_entry_ident.span(),
     );
     quote! {
+        // The "scoped Cargo cache protocol": cuda-oxide's `#[kernel]` records
+        // the backend's codegen identity (output mode, arch, tool provenance)
+        // in the *device crate's* dep-info so that only crates owning device
+        // code are rebuilt when it changes. `option_env!` does the same from
+        // stable Rust (rustc tracks env vars read by `env!`/`option_env!`).
+        #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
+        const _: (Option<&str>, Option<&str>, Option<&str>) = (
+            option_env!("CUDA_OXIDE_INTERNAL_CODEGEN_FINGERPRINT"),
+            option_env!("CUDA_OXIDE_MATERIALIZE_CUBIN"),
+            option_env!("CUDA_OXIDE_INTERNAL_MATERIALIZER_PROVENANCE"),
+        );
+
         #[cfg(all(feature = "cuda-oxide", not(target_arch = "spirv")))]
         #[allow(non_snake_case)]
         // `no_mangle` forces local codegen: without it rustc's
@@ -464,3 +484,9 @@ pub(super) fn generate_cuda_oxide_entry_block(
         }
     }
 }
+
+/// cuda-oxide's reserved kernel-entry prefix (`reserved_oxide_symbols::KERNEL_PREFIX`).
+/// The backend strips it to obtain the PTX `.entry` name, so the PTX entry is
+/// exactly `CUDA_ENTRY_POINT`. Keep in sync with the `cuda-device` revision
+/// pinned in `khal-std/Cargo.toml`.
+const CUDA_OXIDE_KERNEL_PREFIX: &str = "cuda_oxide_codegen_v1_cuda_oxide_kernel_246e25db_";

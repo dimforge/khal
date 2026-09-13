@@ -11,6 +11,9 @@ metal = [ "khal/metal" ]
 cpu = ["khal/cpu", "khal-example-shaders/cpu"]
 cpu-parallel = ["cpu", "khal-example-shaders/cpu-parallel"]
 cuda = ["khal/cuda", "khal-builder/cuda", "khal-example-shaders/cuda"]
+# Native CUDA with kernels compiled by cuda-oxide (`cargo oxide`) rather than
+# rust-cuda's `cargo cuda`. Implies `cuda`.
+cuda-oxide = ["cuda", "khal-builder/cuda-oxide", "khal-example-shaders/cuda-oxide"]
 
 [dependencies]
 khal = { version = "0.3.0", path = "../khal", features = ["derive"] }

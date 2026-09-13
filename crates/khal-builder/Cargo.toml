@@ -8,7 +8,12 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [features]
+# Build PTX for the CUDA backend with rust-cuda's `cargo cuda`.
 cuda = []
+# Build PTX for the CUDA backend with cuda-oxide's `cargo oxide` instead
+# (unified host-target interception; the shader crate must expose a
+# `cuda-oxide` feature forwarding to `khal-std/cuda-oxide`). Implies `cuda`.
+cuda-oxide = ["cuda"]
 unsafe_remove_boundchecks = []
 
 [dependencies]

@@ -35,9 +35,23 @@ pub fn workgroup_memory_barrier_with_group_sync() {
     {
         cuda_device::sync_threads();
     }
+    // rust-cuda: link the LLVM intrinsic directly rather than calling
+    // `cuda_std::thread::sync_threads()`. That helper calls an external
+    // `__nvvm_block_barrier` from a bitcode library, so rustc's LLVM sees a
+    // plain (non-`convergent`) call and freely jump-threads / duplicates it.
+    // For `if tid < stride { .. } barrier()` tree reductions this yields
+    // `bar.sync` at different PCs for threads of the same warp, which
+    // deadlocks on sm_70+ (`bar.sync` is `.aligned`). The named intrinsic
+    // carries LLVM's `convergent` attribute, so it stays at the join point.
     #[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
     {
-        cuda_std::thread::sync_threads();
+        unsafe extern "C" {
+            #[link_name = "llvm.nvvm.barrier0"]
+            fn nvvm_barrier0();
+        }
+        unsafe {
+            nvvm_barrier0();
+        }
     }
 
     #[cfg(not(any(

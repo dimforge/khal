@@ -35,20 +35,37 @@ mod cuda_oxide_float {
     }
 
     macro_rules! float_impl {
-        ($ty:ty, $exp:ident, $ln:ident, $sqrt:ident, $pow:ident, $floor:ident, $ceil:ident,
+        ($ty:ty, $sqrt:ident, $pow:ident, $floor:ident, $ceil:ident,
+         $nvexp:ident, $nvlog:ident,
          $nvatan:ident, $nvsin:ident, $nvcos:ident, $nvasin:ident, $nvacos:ident, $nvatan2:ident) => {
             impl Float for $ty {
+                // `exp`/`ln` go through libdevice externs (like the trig
+                // methods below) rather than `core::intrinsics::expf32` &co:
+                // those intrinsic names were removed from newer nightlies,
+                // while the `__nv_*` symbols are stable across toolchains.
                 #[inline(always)]
-                fn exp(self) -> $ty { unsafe { core::intrinsics::$exp(self) } }
+                fn exp(self) -> $ty {
+                    unsafe extern "C" { fn $nvexp(x: $ty) -> $ty; }
+                    unsafe { $nvexp(self) }
+                }
                 #[inline(always)]
-                fn ln(self) -> $ty { unsafe { core::intrinsics::$ln(self) } }
+                fn ln(self) -> $ty {
+                    unsafe extern "C" { fn $nvlog(x: $ty) -> $ty; }
+                    unsafe { $nvlog(self) }
+                }
+                // These intrinsics still exist on every nightly cuda-oxide
+                // supports; newer toolchains made them safe, hence the allow.
                 #[inline(always)]
+                #[allow(unused_unsafe)]
                 fn sqrt(self) -> $ty { unsafe { core::intrinsics::$sqrt(self) } }
                 #[inline(always)]
+                #[allow(unused_unsafe)]
                 fn powf(self, n: $ty) -> $ty { unsafe { core::intrinsics::$pow(self, n) } }
                 #[inline(always)]
+                #[allow(unused_unsafe)]
                 fn floor(self) -> $ty { unsafe { core::intrinsics::$floor(self) } }
                 #[inline(always)]
+                #[allow(unused_unsafe)]
                 fn ceil(self) -> $ty { unsafe { core::intrinsics::$ceil(self) } }
                 // abs/max/min via plain ops (no stable intrinsic names here).
                 #[inline(always)]
@@ -90,8 +107,8 @@ mod cuda_oxide_float {
             }
         };
     }
-    float_impl!(f32, expf32, logf32, sqrtf32, powf32, floorf32, ceilf32,
+    float_impl!(f32, sqrtf32, powf32, floorf32, ceilf32, __nv_expf, __nv_logf,
         __nv_atanf, __nv_sinf, __nv_cosf, __nv_asinf, __nv_acosf, __nv_atan2f);
-    float_impl!(f64, expf64, logf64, sqrtf64, powf64, floorf64, ceilf64,
+    float_impl!(f64, sqrtf64, powf64, floorf64, ceilf64, __nv_exp, __nv_log,
         __nv_atan, __nv_sin, __nv_cos, __nv_asin, __nv_acos, __nv_atan2);
 }

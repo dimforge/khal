@@ -16,6 +16,9 @@ build = "build.rs"
 cpu = ["khal-std/cpu"]
 cpu-parallel = ["khal-std/cpu-parallel"]
 cuda = ["khal-std/cuda"]
+# Compile the CUDA kernels with the cuda-oxide backend (host-target unified
+# interception) instead of rust-cuda; see khal-std's feature docs.
+cuda-oxide = ["khal-std/cuda-oxide"]
 
 [dependencies]
 khal-std = { path = "../khal-std" }

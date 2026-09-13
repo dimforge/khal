@@ -8,7 +8,7 @@
 // nvptx inline asm (warp shuffle in `sync::subgroup`) is unstable; the
 // cuda-oxide backend compiles for the real nvptx64 target so it needs the gate.
 #![cfg_attr(target_arch = "nvptx64", feature(asm_experimental_arch))]
-// `Float` for the cuda-oxide backend calls `core::intrinsics::{expf32,..}`
+// `Float` for the cuda-oxide backend calls `core::intrinsics::{sqrtf32,..}`
 // (lowered to libdevice `__nv_*` by cuda-oxide) instead of software libm.
 #![cfg_attr(feature = "cuda-oxide", feature(core_intrinsics))]
 #![cfg_attr(feature = "cuda-oxide", allow(internal_features))]

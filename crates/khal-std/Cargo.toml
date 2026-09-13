@@ -38,7 +38,9 @@ rust-cuda = ["dep:cuda_std"]
 # The `cuda-device` API-surface crate resolves from upstream NVlabs
 # cuda-oxide (git pin below); consuming workspaces may [patch] it to a local
 # checkout when hacking on both.
-cuda-oxide = ["dep:num-traits", "dep:cuda-device"]
+# `glamx/scalar-math`: the unified path compiles shader crates for the HOST
+# target, so glam must not take its SSE/SIMD paths (those don't lower to PTX).
+cuda-oxide = ["dep:num-traits", "dep:cuda-device", "glamx/scalar-math"]
 
 [dependencies]
 glamx = { version = "0.3", default-features = false, features = ["nostd-libm", "bytemuck", "u32", "i32", "f64"] }
