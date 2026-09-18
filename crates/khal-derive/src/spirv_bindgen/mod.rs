@@ -666,6 +666,7 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
         &func,
         &original_params,
         &bindings,
+        workgroup_size,
         &cuda_entry_ident,
     );
 

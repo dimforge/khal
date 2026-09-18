@@ -243,8 +243,11 @@ pub(super) fn generate_cuda_oxide_entry_block(
     func: &syn::ItemFn,
     original_params: &[OriginalParam],
     bindings: &[ShaderBinding],
+    workgroup_size: [u32; 3],
     cuda_entry_ident: &syn::Ident,
 ) -> proc_macro2::TokenStream {
+    let wg_x = workgroup_size[0];
+    let wg_y = workgroup_size[1];
     let all_params: Vec<&OriginalParam> = original_params
         .iter()
         .filter(|p| {
@@ -373,10 +376,13 @@ pub(super) fn generate_cuda_oxide_entry_block(
                     BuiltinKind::NumWorkgroups => {
                         quote! { khal_std::arch::cuda::num_workgroups() }
                     }
+                    // Flattened like SPIR-V's LocalInvocationIndex
+                    // (x + y * size_x + z * size_x * size_y): kernels declared
+                    // with 2D/3D `threads(..)` are launched with 2D/3D blocks.
                     BuiltinKind::LocalInvocationIndex => {
                         quote! {{
                             let __tid = khal_std::arch::cuda::thread_idx();
-                            __tid.x
+                            __tid.z * #wg_x * #wg_y + __tid.y * #wg_x + __tid.x
                         }}
                     }
                     _ => quote! { Default::default() },
