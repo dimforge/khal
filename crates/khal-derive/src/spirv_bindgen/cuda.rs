@@ -96,25 +96,20 @@ pub(super) fn generate_cuda_entry_block(
     for param in &all_params {
         let name = &param.name;
         match &param.kind {
+            // Builtins derive from the VIRTUAL workgroup of the current loop
+            // iteration (see `virtual_workgroup_loop`), not the hardware block.
             OriginalParamKind::Builtin(kind) => {
                 let arg = match kind {
                     BuiltinKind::GlobalInvocationId => {
-                        quote! { khal_std::arch::cuda::global_invocation_id() }
+                        quote! { __khal_wg * __khal_block_dim + __khal_tid }
                     }
-                    BuiltinKind::LocalInvocationId => {
-                        quote! { khal_std::arch::cuda::local_invocation_id() }
-                    }
-                    BuiltinKind::WorkgroupId => {
-                        quote! { khal_std::arch::cuda::workgroup_id() }
-                    }
-                    BuiltinKind::NumWorkgroups => {
-                        quote! { khal_std::arch::cuda::num_workgroups() }
-                    }
+                    BuiltinKind::LocalInvocationId => quote! { __khal_tid },
+                    BuiltinKind::WorkgroupId => quote! { __khal_wg },
+                    BuiltinKind::NumWorkgroups => quote! { __khal_num_wg },
                     BuiltinKind::LocalInvocationIndex => {
-                        quote! {{
-                            let __tid = khal_std::arch::cuda::thread_idx();
-                            __tid.z * #wg_x * #wg_y + __tid.y * #wg_x + __tid.x
-                        }}
+                        quote! {
+                            (__khal_tid.z * #wg_x * #wg_y + __khal_tid.y * #wg_x + __khal_tid.x)
+                        }
                     }
                     _ => {
                         quote! { Default::default() }
@@ -216,14 +211,32 @@ pub(super) fn generate_cuda_entry_block(
 
     // Only generate if there are bindings (otherwise it's not a real kernel)
     if !sorted_bindings.is_empty() || !sorted_push_constants.is_empty() {
+        let (loop_prologue, wg_decl, iteration_barrier) = virtual_workgroup_loop(quote! {
+            if __khal_indirect_len >= 3 {
+                let __a = unsafe {
+                    core::slice::from_raw_parts(__khal_indirect_ptr as *const u32, 3)
+                };
+                Some([__a[0], __a[1], __a[2]])
+            } else {
+                None
+            }
+        });
         quote! {
             #[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
             #[khal_std::cuda_std::kernel]
             pub unsafe fn #cuda_entry_ident(
-                #(#cuda_params),*
+                #(#cuda_params,)*
+                __khal_indirect_ptr: u64,
+                __khal_indirect_len: u64,
             ) {
                 #(#cuda_body)*
-                #func_ident(#(#cuda_call_args),*);
+                #loop_prologue
+                while __khal_lin < __khal_total {
+                    #wg_decl
+                    #func_ident(#(#cuda_call_args),*);
+                    __khal_lin += __khal_stride;
+                    #iteration_barrier
+                }
             }
         }
     } else {
@@ -357,37 +370,34 @@ pub(super) fn generate_cuda_oxide_entry_block(
         })
         .collect();
 
-    // Preludes for builtins and workgroup shared memory, in original order.
+    // Preludes for workgroup shared memory (once per kernel) and for builtins
+    // (once per virtual-workgroup iteration), in original order.
     let mut preludes: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut builtin_preludes: Vec<proc_macro2::TokenStream> = Vec::new();
     for p in &all_params {
         let name = &p.name;
         match &p.kind {
+            // Builtins derive from the VIRTUAL workgroup of the current loop
+            // iteration (see `virtual_workgroup_loop`), not the hardware block.
             OriginalParamKind::Builtin(kind) => {
                 let expr = match kind {
                     BuiltinKind::GlobalInvocationId => {
-                        quote! { khal_std::arch::cuda::global_invocation_id() }
+                        quote! { __khal_wg * __khal_block_dim + __khal_tid }
                     }
-                    BuiltinKind::LocalInvocationId => {
-                        quote! { khal_std::arch::cuda::local_invocation_id() }
-                    }
-                    BuiltinKind::WorkgroupId => {
-                        quote! { khal_std::arch::cuda::workgroup_id() }
-                    }
-                    BuiltinKind::NumWorkgroups => {
-                        quote! { khal_std::arch::cuda::num_workgroups() }
-                    }
+                    BuiltinKind::LocalInvocationId => quote! { __khal_tid },
+                    BuiltinKind::WorkgroupId => quote! { __khal_wg },
+                    BuiltinKind::NumWorkgroups => quote! { __khal_num_wg },
                     // Flattened like SPIR-V's LocalInvocationIndex
                     // (x + y * size_x + z * size_x * size_y): kernels declared
                     // with 2D/3D `threads(..)` are launched with 2D/3D blocks.
                     BuiltinKind::LocalInvocationIndex => {
-                        quote! {{
-                            let __tid = khal_std::arch::cuda::thread_idx();
-                            __tid.z * #wg_x * #wg_y + __tid.y * #wg_x + __tid.x
-                        }}
+                        quote! {
+                            (__khal_tid.z * #wg_x * #wg_y + __khal_tid.y * #wg_x + __khal_tid.x)
+                        }
                     }
                     _ => quote! { Default::default() },
                 };
-                preludes.push(quote! { let #name = #expr; });
+                builtin_preludes.push(quote! { let #name = #expr; });
             }
             OriginalParamKind::Workgroup => {
                 // `#[spirv(workgroup)] x: &mut [T; N]`  ->  a function-local
@@ -463,6 +473,13 @@ pub(super) fn generate_cuda_oxide_entry_block(
         &format!("{CUDA_OXIDE_KERNEL_PREFIX}{cuda_entry_ident}"),
         cuda_entry_ident.span(),
     );
+    let (loop_prologue, wg_decl, iteration_barrier) = virtual_workgroup_loop(quote! {
+        if __khal_indirect_args.len() >= 3 {
+            Some([__khal_indirect_args[0], __khal_indirect_args[1], __khal_indirect_args[2]])
+        } else {
+            None
+        }
+    });
     quote! {
         // The "scoped Cargo cache protocol": cuda-oxide's `#[kernel]` records
         // the backend's codegen identity (output mode, arch, tool provenance)
@@ -483,10 +500,26 @@ pub(super) fn generate_cuda_oxide_entry_block(
         // trivial kernels (nothing in-crate calls an entry point), and the
         // collector never sees them.
         #[unsafe(no_mangle)]
-        pub fn #prefixed_entry_ident(#(#kernel_params),*) {
+        pub fn #prefixed_entry_ident(
+            #(#kernel_params,)*
+            __khal_indirect_args: &[u32],
+        ) {
             #(#preludes)*
             #(#array_reconstructions)*
-            #body
+            #loop_prologue
+            // The shader body runs once per virtual workgroup. It lives in a
+            // closure so that an early `return` in the body ends the current
+            // iteration, not the whole loop.
+            let mut __khal_body = |__khal_wg: khal_std::glamx::UVec3| {
+                #(#builtin_preludes)*
+                #body
+            };
+            while __khal_lin < __khal_total {
+                #wg_decl
+                __khal_body(__khal_wg);
+                __khal_lin += __khal_stride;
+                #iteration_barrier
+            }
         }
     }
 }
@@ -496,3 +529,66 @@ pub(super) fn generate_cuda_oxide_entry_block(
 /// exactly `CUDA_ENTRY_POINT`. Keep in sync with the `cuda-device` revision
 /// pinned in `khal-std/Cargo.toml`.
 const CUDA_OXIDE_KERNEL_PREFIX: &str = "cuda_oxide_codegen_v1_cuda_oxide_kernel_246e25db_";
+
+/// Virtual-workgroup loop shared by both CUDA entry flavours.
+///
+/// CUDA has no device-side indirect dispatch. khal's CUDA backend therefore
+/// launches indirect dispatches with a fixed number of resident blocks and
+/// hands the entry the indirect-args `[u32; 3]` as a trailing `(ptr, len)`
+/// slice (`(0, 0)` for direct dispatches). The entry loops over the virtual
+/// workgroups `lin = block_id; lin < x*y*z; lin += real_grid_size`, so:
+/// - a direct dispatch runs exactly one iteration per block (no overhead
+///   beyond a few integer ops),
+/// - an indirect dispatch runs the exact virtual workgroup count without any
+///   host round trip,
+/// - the trip count is uniform per block, so workgroup barriers in the body
+///   remain valid.
+///
+/// `read_args` must evaluate to `Option<[u32; 3]>` (the indirect args when
+/// present). Returns `(prologue, wg_decl, iteration_barrier)`: the prologue
+/// defines `__khal_tid`, `__khal_block_dim`, `__khal_num_wg` and the loop
+/// bounds; the per-iteration declaration defines `__khal_wg` from
+/// `__khal_lin`; the barrier separates consecutive virtual workgroups.
+fn virtual_workgroup_loop(
+    read_args: proc_macro2::TokenStream,
+) -> (
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+    proc_macro2::TokenStream,
+) {
+    let prologue = quote! {
+        let __khal_tid = khal_std::arch::cuda::thread_idx();
+        let __khal_block_dim = khal_std::arch::cuda::block_dim();
+        let __khal_real_grid = khal_std::arch::cuda::num_workgroups();
+        let __khal_num_wg: khal_std::glamx::UVec3 = match #read_args {
+            Some(a) => khal_std::glamx::UVec3::new(a[0], a[1], a[2]),
+            None => __khal_real_grid,
+        };
+        let __khal_total = __khal_num_wg.x * __khal_num_wg.y * __khal_num_wg.z;
+        let __khal_stride = __khal_real_grid.x * __khal_real_grid.y * __khal_real_grid.z;
+        let __khal_bid = khal_std::arch::cuda::block_idx();
+        let mut __khal_lin = __khal_bid.x
+            + __khal_bid.y * __khal_real_grid.x
+            + __khal_bid.z * __khal_real_grid.x * __khal_real_grid.y;
+    };
+    let wg_decl = quote! {
+        let __khal_wg = khal_std::glamx::UVec3::new(
+            __khal_lin % __khal_num_wg.x,
+            (__khal_lin / __khal_num_wg.x) % __khal_num_wg.y,
+            __khal_lin / (__khal_num_wg.x * __khal_num_wg.y),
+        );
+    };
+    // A real workgroup starts with all of its threads synchronized and its
+    // shared memory untouched by anyone else. Between two virtual workgroups
+    // of the same block, fast threads would otherwise start writing the next
+    // iteration's shared-memory staging while slow threads still read the
+    // previous one's (nexus MPM G2P halo nodes: particles in the top rows of
+    // a block went astray once blocks looped). The condition is uniform per
+    // block, so the barrier is well-formed and skipped on the last iteration.
+    let iteration_barrier = quote! {
+        if __khal_lin < __khal_total {
+            khal_std::sync::workgroup_memory_barrier_with_group_sync();
+        }
+    };
+    (prologue, wg_decl, iteration_barrier)
+}

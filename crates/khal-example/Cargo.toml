@@ -12,8 +12,12 @@ cpu = ["khal/cpu", "khal-example-shaders/cpu"]
 cpu-parallel = ["cpu", "khal-example-shaders/cpu-parallel"]
 cuda = ["khal/cuda", "khal-builder/cuda", "khal-example-shaders/cuda"]
 # Native CUDA with kernels compiled by cuda-oxide (`cargo oxide`) rather than
-# rust-cuda's `cargo cuda`. Implies `cuda`.
-cuda-oxide = ["cuda", "khal-builder/cuda-oxide", "khal-example-shaders/cuda-oxide"]
+# rust-cuda's `cargo cuda`. Implies `cuda`. Deliberately does NOT forward to
+# the shader crate's `cuda-oxide` feature: khal-builder enables that one in its
+# separate `cargo oxide` build only. In the host build it would swap khal-std's
+# `Float`/atomics for GPU-only libdevice externs, which the CPU backend (`cpu`)
+# cannot link.
+cuda-oxide = ["cuda", "khal-builder/cuda-oxide"]
 
 [dependencies]
 khal = { version = "0.3.0", path = "../khal", features = ["derive"] }

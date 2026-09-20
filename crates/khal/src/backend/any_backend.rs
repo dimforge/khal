@@ -668,6 +668,7 @@ impl GpuPass {
                 args: Vec::new(),
                 #[cfg(feature = "push_constants")]
                 push_constants: Vec::new(),
+                persistent_blocks: pass.persistent_blocks,
             }),
             #[cfg(feature = "metal")]
             (Self::Metal(pass), InnerGpuFunction::Metal(f)) => {

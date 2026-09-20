@@ -54,6 +54,11 @@ pub struct Cuda {
     /// Cache of loaded PTX modules keyed by content hash.
     /// Avoids re-loading the same PTX for every kernel in a crate.
     module_cache: Arc<Mutex<HashMap<u64, Arc<driver::CudaModule>>>>,
+    /// Grid size (in blocks) used for indirect dispatches: CUDA has no
+    /// device-side indirect launch, so the generated kernel entries loop over
+    /// the *virtual* workgroups read from the indirect-args buffer with this
+    /// many resident blocks. See [`CudaDispatch::launch`].
+    persistent_blocks: u32,
 }
 
 impl Cuda {
@@ -64,10 +69,23 @@ impl Cuda {
         // captured into a CUDA graph (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED),
         // and all khal work is ordered on this one stream anyway.
         let stream = ctx.new_stream()?;
+        // Enough blocks to fill the device several times over for the small
+        // (64-thread) workgroups khal kernels use; `KHAL_CUDA_PERSISTENT_BLOCKS`
+        // overrides it.
+        let sms = ctx
+            .attribute(driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .unwrap_or(16)
+            .max(1) as u32;
+        let persistent_blocks = std::env::var("KHAL_CUDA_PERSISTENT_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(sms * 16);
         Ok(Self {
             ctx,
             stream,
             module_cache: Arc::new(Mutex::new(HashMap::new())),
+            persistent_blocks,
         })
     }
 
@@ -239,6 +257,8 @@ pub struct CudaFunction {
 /// is essentially a thin wrapper that holds a reference to the stream.
 pub struct CudaEncoder {
     pub(crate) stream: Arc<CudaStream>,
+    /// See [`Cuda::persistent_blocks`]; forwarded to passes and dispatches.
+    pub(crate) persistent_blocks: u32,
 }
 
 /// CUDA compute pass. CUDA doesn't have explicit compute pass boundaries.
@@ -246,6 +266,8 @@ pub struct CudaPass {
     pub(crate) stream: Arc<CudaStream>,
     /// Optional timing: records an end event on drop and pushes to the shared pending list.
     timing: Option<CudaPassTiming>,
+    /// See [`Cuda::persistent_blocks`].
+    pub(crate) persistent_blocks: u32,
 }
 
 impl Drop for CudaPass {
@@ -284,6 +306,8 @@ pub struct CudaDispatch<'a> {
     pub(crate) args: Vec<(ShaderBinding, u64, u64)>,
     #[cfg(feature = "push_constants")]
     pub(crate) push_constants: Vec<u8>,
+    /// See [`Cuda::persistent_blocks`].
+    pub(crate) persistent_blocks: u32,
 }
 
 impl<'a> CudaDispatch<'a> {
@@ -458,6 +482,7 @@ impl Backend for Cuda {
     fn begin_encoding(&self) -> Self::Encoder {
         CudaEncoder {
             stream: self.stream.clone(),
+            persistent_blocks: self.persistent_blocks,
         }
     }
 
@@ -472,6 +497,7 @@ impl Backend for Cuda {
             args: Vec::new(),
             #[cfg(feature = "push_constants")]
             push_constants: Vec::new(),
+            persistent_blocks: self.persistent_blocks,
         }
     }
 
@@ -632,6 +658,7 @@ impl Encoder<Cuda> for CudaEncoder {
         CudaPass {
             stream: self.stream.clone(),
             timing,
+            persistent_blocks: self.persistent_blocks,
         }
     }
 
@@ -670,6 +697,10 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
         grid: impl Into<DispatchGrid<'b, Cuda>>,
         block_dim: [u32; 3],
     ) -> Result<(), CudaBackendError> {
+        // Indirect-args slice handed to the kernel entry as a trailing
+        // `(ptr, len)` pair: `(0, 0)` for direct dispatches (the entry then
+        // uses the real grid), the device `[u32; 3]` for indirect ones.
+        let mut indirect_args: (u64, u64) = (0, 0);
         let grid_dim = match grid.into() {
             DispatchGrid::Grid(g) => g,
             DispatchGrid::ThreadCount(t) => [
@@ -678,25 +709,37 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
                 t[2].div_ceil(block_dim[2]),
             ],
             DispatchGrid::Indirect(buffer) => {
-                // CUDA doesn't support indirect dispatch natively.
-                // Read the 12-byte dispatch args from device memory.
                 if std::env::var("KHAL_TRACE_INDIRECT").is_ok() {
                     eprintln!("[khal] indirect dispatch: {}", self.function.name);
                 }
-                self.stream.synchronize()?;
-                if let Some(ref inner) = buffer.inner {
+                let Some(ref inner) = buffer.inner else {
+                    return Ok(());
+                };
+                if std::env::var_os("KHAL_CUDA_INDIRECT_SYNC").is_some() {
+                    // Debug fallback: read the 12-byte dispatch args back to
+                    // the host and launch the exact grid. Drains the stream on
+                    // every indirect dispatch.
+                    self.stream.synchronize()?;
                     let bytes: Vec<u8> = self.stream.clone_dtoh(inner)?;
-                    if bytes.len() >= 12 {
-                        [
-                            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                            u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-                            u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-                        ]
-                    } else {
+                    if bytes.len() < 12 {
                         return Ok(());
                     }
+                    [
+                        u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                        u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+                        u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+                    ]
                 } else {
-                    return Ok(());
+                    // CUDA has no device-side indirect launch. Instead of
+                    // reading the workgroup count back (a full stream drain per
+                    // dispatch), launch a fixed number of resident blocks: the
+                    // generated entry reads the `[u32; 3]` on the device and
+                    // loops over the virtual workgroups
+                    // (`lin = block_id; lin < x*y*z; lin += grid_size`), so
+                    // every block runs a uniform trip count and workgroup
+                    // barriers stay valid.
+                    indirect_args = (buffer.device_ptr_raw(), 3);
+                    [self.persistent_blocks, 1, 1]
                 }
             }
         };
@@ -742,6 +785,11 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
                 param_values.push(u64::from_ne_bytes(buf));
             }
         }
+
+        // Trailing indirect-args `(ptr, len)` pair (see above); the generated
+        // CUDA entries always declare it.
+        param_values.push(indirect_args.0);
+        param_values.push(indirect_args.1);
 
         // Launch using cudarc's launch_builder API.
         let mut builder = self.stream.launch_builder(&self.function.func);
