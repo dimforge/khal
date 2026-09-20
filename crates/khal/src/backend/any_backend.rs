@@ -992,6 +992,11 @@ enum ReadbackState {
     /// handler once the copy has landed in the shared staging buffer.
     #[cfg(feature = "metal")]
     Metal(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// A CUDA event recorded right after the async device→host copy of the
+    /// staging buffer into the readback's pinned host mirror; complete once
+    /// the data is on the host.
+    #[cfg(feature = "cuda")]
+    Cuda(cudarc::driver::CudaEvent),
 }
 
 /// Non-blocking GPU→CPU readback of a small buffer region.
@@ -1008,6 +1013,12 @@ pub struct GpuReadback<T: DeviceValue + AnyBitPattern> {
     staging: GpuBuffer<T>,
     len: usize,
     state: ReadbackState,
+    /// CUDA: page-locked host mirror of `staging`. Device memory is never
+    /// host-visible, so each request enqueues an async device→host copy into
+    /// this buffer (pinned memory keeps that copy asynchronous) and
+    /// [`try_take`](Self::try_take) polls the event recorded after it.
+    #[cfg(feature = "cuda")]
+    cuda_host: Option<cudarc::driver::PinnedHostSlice<u8>>,
 }
 
 // SAFETY: mirrors `MetalTimestamps` — the only non-`Send`/`Sync` payload is a
@@ -1021,10 +1032,24 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
     pub fn new(backend: &GpuBackend, len: usize) -> Result<Self, GpuBackendError> {
         let staging =
             backend.uninit_buffer::<T>(len, BufferUsages::MAP_READ | BufferUsages::COPY_DST)?;
+        #[cfg(feature = "cuda")]
+        let cuda_host = match (&staging, backend) {
+            (GpuBuffer::Cuda(_), GpuBackend::Cuda(cuda)) if len > 0 => {
+                let nbytes = len * std::mem::size_of::<T>();
+                // SAFETY: the pinned memory is only ever read after a
+                // device→host copy of `nbytes` bytes has completed into it.
+                let host = unsafe { cuda.context().alloc_pinned::<u8>(nbytes) }
+                    .map_err(|e| GpuBackendError::Cuda(e.into()))?;
+                Some(host)
+            }
+            _ => None,
+        };
         Ok(Self {
             staging,
             len,
             state: ReadbackState::Idle,
+            #[cfg(feature = "cuda")]
+            cuda_host,
         })
     }
 
@@ -1094,8 +1119,33 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
     }
 
     /// Sets up backend-specific completion tracking after the copy is submitted.
-    fn begin_completion(&self, backend: &GpuBackend) -> ReadbackState {
+    fn begin_completion(&mut self, backend: &GpuBackend) -> ReadbackState {
         match (&self.staging, backend) {
+            #[cfg(feature = "cuda")]
+            (GpuBuffer::Cuda(buffer), GpuBackend::Cuda(cuda)) => {
+                // Enqueue the device→host copy into the pinned mirror right
+                // behind the staging copy, then record an event to poll. Both
+                // are asynchronous (pinned destination), so nothing here waits
+                // on the GPU. If anything fails, fall back to a synchronous
+                // read of the staging buffer at take time.
+                let nbytes = self.len * std::mem::size_of::<T>();
+                match (buffer.inner(), self.cuda_host.as_mut()) {
+                    (Some(inner), Some(host)) if nbytes > 0 => {
+                        let stream = cuda.stream();
+                        let copied = stream.memcpy_dtoh(&inner.slice(..nbytes), host);
+                        let event = copied.and_then(|()| {
+                            stream.record_event(Some(
+                                cudarc::driver::sys::CUevent_flags::CU_EVENT_DISABLE_TIMING,
+                            ))
+                        });
+                        match event {
+                            Ok(done) => ReadbackState::Cuda(done),
+                            Err(_) => ReadbackState::Ready,
+                        }
+                    }
+                    _ => ReadbackState::Ready,
+                }
+            }
             #[cfg(feature = "webgpu")]
             (GpuBuffer::WebGpu(buffer), _) => {
                 let (sender, receiver) = async_channel::bounded(1);
@@ -1150,6 +1200,36 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
                     false
                 }
             }
+            #[cfg(feature = "cuda")]
+            ReadbackState::Cuda(done) => {
+                if done.is_complete() {
+                    self.read_cuda_host_into(out);
+                    true
+                } else {
+                    self.state = ReadbackState::Cuda(done);
+                    false
+                }
+            }
+        }
+    }
+
+    /// CUDA: copies the pinned host mirror (filled by the request's async
+    /// device→host copy, whose event has completed) into `out`.
+    #[cfg(feature = "cuda")]
+    fn read_cuda_host_into(&self, out: &mut [T]) {
+        let n = out.len().min(self.len);
+        if n == 0 {
+            return;
+        }
+        let Some(host) = self.cuda_host.as_ref() else {
+            return self.read_staging_into(out);
+        };
+        // `as_slice` waits on the pinned slice's own transfer event, which is
+        // already complete here, so this does not block.
+        if let Ok(bytes) = host.as_slice() {
+            let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out[..n]);
+            let len = dst.len().min(bytes.len());
+            dst[..len].copy_from_slice(&bytes[..len]);
         }
     }
 
@@ -1172,6 +1252,19 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
                         out.as_mut_ptr(),
                         n,
                     );
+                }
+            }
+            #[cfg(feature = "cuda")]
+            GpuBuffer::Cuda(buffer) => {
+                // Synchronous fallback (no pinned mirror / event): copy straight
+                // from the device staging buffer. Blocks until the stream has
+                // run the staging copy.
+                if let Some(inner) = buffer.inner() {
+                    let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out[..n]);
+                    let nbytes = dst.len().min(inner.len());
+                    let _ = inner
+                        .stream()
+                        .memcpy_dtoh(&inner.slice(..nbytes), &mut dst[..nbytes]);
                 }
             }
             #[cfg(feature = "webgpu")]
