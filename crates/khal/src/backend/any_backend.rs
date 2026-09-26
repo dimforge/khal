@@ -2,7 +2,8 @@
 use crate::backend::WebGpu;
 #[cfg(feature = "cuda")]
 use crate::backend::cuda::{
-    Cuda, CudaBackendError, CudaBuffer, CudaBufferSlice, CudaDispatch as CudaDispatchInner,
+    CapturedGraph, Cuda, CudaBackendError, CudaBuffer, CudaBufferSlice,
+    CudaDispatch as CudaDispatchInner,
     CudaEncoder as CudaEncoderInner, CudaFunction as CudaFunctionInner,
     CudaModule as CudaModuleInner, CudaPass as CudaPassInner, CudaTimestamps,
 };
@@ -54,6 +55,43 @@ impl GpuBackend {
             Self::Metal(_) => super::CompileTarget::Spirv,
             #[cfg(feature = "cpu")]
             Self::Cpu => super::CompileTarget::Wgsl,
+        }
+    }
+
+    /// Whether [`Self::begin_capture`] / [`Self::end_capture`] are available
+    /// (CUDA graphs). WebGPU, Metal and CPU have no equivalent.
+    pub fn supports_graphs(&self) -> bool {
+        self.is_cuda()
+    }
+
+    /// Starts recording every dispatch, buffer copy and event submitted to
+    /// this backend into a graph instead of executing it, until
+    /// [`Self::end_capture`]. The recorded work is NOT executed by the capture
+    /// itself: launch the returned [`GpuGraph`] to run it.
+    ///
+    /// The captured region must be replay-safe: no buffer allocation or
+    /// release, no host readback or synchronization, no upload from pageable
+    /// host memory, and every buffer address used must stay valid for as long
+    /// as the graph is replayed. Host-side control flow (dispatch counts, loop
+    /// trip counts) is frozen at capture time.
+    pub fn begin_capture(&self) -> Result<(), GpuBackendError> {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(cuda) => Ok(cuda.begin_capture()?),
+            #[allow(unreachable_patterns)]
+            _ => Err(GpuBackendError::Unsupported("graph capture")),
+        }
+    }
+
+    /// Ends the recording started by [`Self::begin_capture`] and returns the
+    /// instantiated graph. Errors if the capture was invalidated (an operation
+    /// that cannot be captured was issued) or recorded nothing.
+    pub fn end_capture(&self) -> Result<GpuGraph, GpuBackendError> {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(cuda) => Ok(GpuGraph::Cuda(cuda.end_capture()?)),
+            #[allow(unreachable_patterns)]
+            _ => Err(GpuBackendError::Unsupported("graph capture")),
         }
     }
 
@@ -788,6 +826,28 @@ pub enum GpuBackendError {
     ContextNotFound,
     #[error("Noop backend error")]
     Noop,
+    #[error("operation not supported by this backend: {0}")]
+    Unsupported(&'static str),
+}
+
+/// A captured sequence of GPU work that can be replayed with a single launch
+/// (see [`GpuBackend::begin_capture`]). Only the CUDA backend can produce one.
+pub enum GpuGraph {
+    #[cfg(feature = "cuda")]
+    Cuda(CapturedGraph),
+}
+
+impl GpuGraph {
+    /// Replays the captured work on `backend`'s queue. Ordered with respect to
+    /// everything else submitted to that queue.
+    pub fn launch(&self, backend: &GpuBackend) -> Result<(), GpuBackendError> {
+        match (self, backend) {
+            #[cfg(feature = "cuda")]
+            (Self::Cuda(graph), GpuBackend::Cuda(_)) => Ok(graph.launch()?),
+            #[allow(unreachable_patterns)]
+            _ => Err(GpuBackendError::Unsupported("graph launch")),
+        }
+    }
 }
 
 /// Result of a single timed compute pass.

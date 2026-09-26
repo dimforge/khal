@@ -119,6 +119,15 @@ the indirect-args buffer on the device. Direct dispatches run exactly one iterat
 loop count is uniform per block so workgroup barriers stay valid. `KHAL_CUDA_INDIRECT_SYNC=1` restores
 the synchronous host readback for debugging.
 
+### CUDA graphs
+
+`GpuBackend::begin_capture()` / `end_capture()` record every dispatch and copy issued in between into a
+`GpuGraph` that `launch()` replays with a single driver call (CUDA only; other backends return
+`GpuBackendError::Unsupported`). The captured region must be replay-safe: no buffer allocation, no host
+readback or synchronization, no upload from pageable host memory, and host-side control flow is frozen
+at capture time. nexus uses this to replay a whole physics frame (`NEXUS_CUDA_GRAPHS=1`, or the
+"CUDA graphs" checkbox / `--cuda-graphs` flag of its testbed).
+
 ### PTX vs. cubin
 
 With either compiler, `khal-builder` then assembles the PTX into a **cubin** for the local GPU using the
