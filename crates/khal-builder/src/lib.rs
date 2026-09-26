@@ -352,7 +352,7 @@ impl KhalBuilder {
 /// The cargo target directory of the build that is running this build
 /// script, derived from `OUT_DIR` (`<target>/<profile>/build/<pkg>-<hash>/out`).
 /// Falls back to a directory under `OUT_DIR` when the layout is unexpected.
-#[cfg(feature = "cuda-oxide")]
+#[cfg(feature = "cuda")]
 fn cargo_target_dir_from_out_dir() -> PathBuf {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let looks_like_cargo_layout = out_dir
@@ -476,9 +476,37 @@ fn find_cuda_tool(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// `sm_XY` of the first local GPU as reported by `nvidia-smi`, if available.
+/// `sm_XY` of the first local GPU.
+///
+/// Tries, in order: `nvidia-smi` (NVML; breaks after a driver package update
+/// until reboot), the toolkit's `__nvcc_device_query` (driver API, unaffected
+/// by NVML), and finally the arch cached by a previous successful detection in
+/// the cargo target dir, so a transient failure keeps building for the same
+/// GPU instead of falling back to driver-JIT'd PTX.
 #[cfg(feature = "cuda")]
 fn detect_local_sm_arch() -> Option<String> {
+    let cache = cargo_target_dir_from_out_dir().join("khal-cuda-arch");
+    let detected = detect_sm_arch_nvidia_smi().or_else(detect_sm_arch_nvcc_device_query);
+    match detected {
+        Some(arch) => {
+            let _ = std::fs::write(&cache, &arch);
+            Some(arch)
+        }
+        None => {
+            let cached = std::fs::read_to_string(&cache).ok()?;
+            let cached = cached.trim();
+            (!cached.is_empty()).then(|| {
+                println!(
+                    "cargo:warning=khal-builder: GPU arch detection failed; using cached {cached}"
+                );
+                cached.to_string()
+            })
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn detect_sm_arch_nvidia_smi() -> Option<String> {
     let out = Command::new("nvidia-smi")
         .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
         .output()
@@ -492,6 +520,20 @@ fn detect_local_sm_arch() -> Option<String> {
     let major: u32 = major.parse().ok()?;
     let minor: u32 = minor.parse().ok()?;
     Some(format!("sm_{major}{minor}"))
+}
+
+/// `__nvcc_device_query` (shipped with the toolkit next to `nvcc`) prints the
+/// compute capability of the first device as e.g. `120`.
+#[cfg(feature = "cuda")]
+fn detect_sm_arch_nvcc_device_query() -> Option<String> {
+    let tool = find_cuda_tool("__nvcc_device_query")?;
+    let out = Command::new(tool).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let cap = String::from_utf8_lossy(&out.stdout);
+    let cap = cap.trim();
+    (!cap.is_empty() && cap.chars().all(|c| c.is_ascii_digit())).then(|| format!("sm_{cap}"))
 }
 
 /// The `.ptx` cargo-oxide produced for the shader crate: `<package>.ptx`
