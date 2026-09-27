@@ -40,6 +40,25 @@ pub fn atomic_add_u32(ptr: &mut u32, value: u32) -> u32 {
     }
 }
 
+/// Atomically subtracts `value` from `*ptr` (u32, wrapping) and returns the old value.
+#[inline(always)]
+pub fn atomic_sub_u32(ptr: &mut u32, value: u32) -> u32 {
+    #[cfg(target_arch = "spirv")]
+    unsafe {
+        spirv_std::arch::atomic_i_sub::<
+            u32,
+            { spirv_std::memory::Scope::QueueFamily as u32 },
+            { spirv_std::memory::Semantics::NONE.bits() },
+        >(ptr, value)
+    }
+    #[cfg(not(target_arch = "spirv"))]
+    {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
+        atomic.fetch_sub(value, Ordering::Relaxed)
+    }
+}
+
 /// Atomically computes max(`*ptr`, `value`) and returns the old value.
 #[inline(always)]
 pub fn atomic_max_u32(ptr: &mut u32, value: u32) -> u32 {
@@ -297,5 +316,20 @@ pub fn atomic_load_u32_workgroup(ptr: &mut u32) -> u32 {
         use core::sync::atomic::{AtomicU32, Ordering};
         let atomic = unsafe { &*(ptr as *mut u32 as *const AtomicU32) };
         atomic.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_sub_u32_returns_the_old_value_and_wraps() {
+        let mut counter = 3u32;
+        assert_eq!(atomic_sub_u32(&mut counter, 1), 3);
+        assert_eq!(counter, 2);
+        let mut zero = 0u32;
+        assert_eq!(atomic_sub_u32(&mut zero, 1), 0);
+        assert_eq!(zero, u32::MAX);
     }
 }

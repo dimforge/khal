@@ -2,6 +2,11 @@
 
 _Disclaimer: this changelog is updated using generative AI, but is still verified manually._
 
+## Unreleased
+
+### Added
+- `atomic_sub_u32` in `khal-std`: atomic wrapping subtraction on a storage-buffer `u32`, returning the old value (`OpAtomicISub` on SPIR-V, `fetch_sub` elsewhere).
+
 ## v0.3.0
 
 ### Changed
