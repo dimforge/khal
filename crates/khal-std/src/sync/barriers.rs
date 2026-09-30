@@ -8,15 +8,14 @@ pub fn workgroup_memory_barrier_with_group_sync() {
     {
         spirv_std::arch::workgroup_memory_barrier_with_group_sync();
     }
-    #[cfg(target_arch = "nvptx64")]
+    // cuda-oxide: `cuda_device::sync_threads` is recognized by name by the
+    // MIR importer on any compilation target and lowers to the convergent
+    // NVVM barrier op (`bar.sync`), which optimization passes will not
+    // tail-duplicate into divergent branches.
+    // Device build (cuda-oxide, real nvptx64 target): raw intrinsic extern —
+    // matched by name by both backend lines ("llvm.nvvm.barrier0").
+    #[cfg(all(feature = "cuda-oxide", target_arch = "nvptx64"))]
     {
-        // Call the LLVM intrinsic directly instead of cuda_std::thread::sync_threads()
-        // so that LLVM sees the `convergent` attribute during optimization passes.
-        // Without this, LLVM tail-duplicates the barrier into both sides of divergent
-        // branches (if/else), causing threads to hit different bar.sync instructions
-        // and deadlocking the block.
-        // This fixes kernels with barriers that were otherwise hanging when using
-        // cuda_std::thread::sync_thread() instead.
         unsafe extern "C" {
             #[link_name = "llvm.nvvm.barrier0"]
             fn nvvm_barrier0();
@@ -24,10 +23,38 @@ pub fn workgroup_memory_barrier_with_group_sync() {
         unsafe {
             nvvm_barrier0();
         }
-        //     cuda_std::thread::sync_threads();
+    }
+    // Unified-compilation host build (cuda-oxide feature on a host target):
+    // the MIR importer intercepts this call by name; the host stub is never
+    // executed natively.
+    #[cfg(all(
+        feature = "cuda-oxide",
+        not(target_arch = "spirv"),
+        not(target_arch = "nvptx64")
+    ))]
+    {
+        cuda_device::sync_threads();
+    }
+    // rust-cuda: link the LLVM intrinsic directly rather than calling
+    // `cuda_std::thread::sync_threads()`. That helper calls an external
+    // `__nvvm_block_barrier` from a bitcode library, so rustc's LLVM sees a
+    // plain (non-`convergent`) call and freely jump-threads / duplicates it.
+    // For `if tid < stride { .. } barrier()` tree reductions this yields
+    // `bar.sync` at different PCs for threads of the same warp, which
+    // deadlocks on sm_70+ (`bar.sync` is `.aligned`). The named intrinsic
+    // carries LLVM's `convergent` attribute, so it stays at the join point.
+    #[cfg(all(target_arch = "nvptx64", not(feature = "cuda-oxide")))]
+    {
+        unsafe extern "C" {
+            #[link_name = "llvm.nvvm.barrier0"]
+            fn nvvm_barrier0();
+        }
+        unsafe {
+            nvvm_barrier0();
+        }
     }
 
-    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))]
+    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64", feature = "cuda-oxide")))]
     #[cfg(feature = "cpu")]
     {
         crate::arch::cpu::barrier_wait();

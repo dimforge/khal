@@ -8,7 +8,41 @@ use cudarc::driver::{self, CudaContext, CudaStream};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+static KERNEL_PROFILE: OnceLock<Mutex<HashMap<String, (u64, u128)>>> = OnceLock::new();
+fn kernel_profile() -> &'static Mutex<HashMap<String, (u64, u128)>> {
+    KERNEL_PROFILE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// Print accumulated per-kernel timings (sorted desc) and clear. No-op if unused.
+pub fn dump_kernel_profile() {
+    let mut map = kernel_profile().lock().unwrap();
+    if map.is_empty() {
+        return;
+    }
+    let mut rows: Vec<_> = map
+        .iter()
+        .map(|(k, (c, ns))| (k.clone(), *c, *ns))
+        .collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2));
+    let total: u128 = rows.iter().map(|r| r.2).sum();
+    eprintln!(
+        "\n=== KHAL_CUDA_PROFILE: {} kernels, {:.3} ms total (serialized) ===",
+        rows.len(),
+        total as f64 / 1e6
+    );
+    for (n, c, ns) in &rows {
+        eprintln!(
+            "{:>9.3} ms  {:>6}x  {:>9.2} us  {:>6.2}%  {}",
+            *ns as f64 / 1e6,
+            c,
+            (*ns as f64 / *c as f64) / 1e3,
+            *ns as f64 / total as f64 * 100.0,
+            n
+        );
+    }
+    map.clear();
+}
 
 // ── Core backend ───────────────────────────────────────────────────────
 
@@ -20,17 +54,38 @@ pub struct Cuda {
     /// Cache of loaded PTX modules keyed by content hash.
     /// Avoids re-loading the same PTX for every kernel in a crate.
     module_cache: Arc<Mutex<HashMap<u64, Arc<driver::CudaModule>>>>,
+    /// Grid size (in blocks) used for indirect dispatches: CUDA has no
+    /// device-side indirect launch, so the generated kernel entries loop over
+    /// the *virtual* workgroups read from the indirect-args buffer with this
+    /// many resident blocks. See [`CudaDispatch::launch`].
+    persistent_blocks: u32,
 }
 
 impl Cuda {
     /// Creates a new CUDA backend using the specified device ordinal.
     pub fn new(device_ordinal: usize) -> Result<Self, CudaBackendError> {
         let ctx = CudaContext::new(device_ordinal)?;
-        let stream = ctx.default_stream();
+        // An owned non-default stream: the legacy NULL stream cannot be
+        // captured into a CUDA graph (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED),
+        // and all khal work is ordered on this one stream anyway.
+        let stream = ctx.new_stream()?;
+        // Enough blocks to fill the device several times over for the small
+        // (64-thread) workgroups khal kernels use; `KHAL_CUDA_PERSISTENT_BLOCKS`
+        // overrides it.
+        let sms = ctx
+            .attribute(driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .unwrap_or(16)
+            .max(1) as u32;
+        let persistent_blocks = std::env::var("KHAL_CUDA_PERSISTENT_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(sms * 16);
         Ok(Self {
             ctx,
             stream,
             module_cache: Arc::new(Mutex::new(HashMap::new())),
+            persistent_blocks,
         })
     }
 
@@ -39,9 +94,79 @@ impl Cuda {
         &self.ctx
     }
 
+    /// Compute capability `(major, minor)` of the underlying device, e.g.
+    /// `(12, 0)` for Blackwell `sm_120`. Used to pick the default backend.
+    pub fn compute_capability(&self) -> Result<(i32, i32), CudaBackendError> {
+        Ok(self.ctx.compute_capability()?)
+    }
+
     /// Returns the default stream.
     pub fn stream(&self) -> &Arc<CudaStream> {
         &self.stream
+    }
+
+    /// Begin CUDA stream capture on the default stream: subsequent kernel
+    /// launches are *recorded* into a graph instead of executed, until
+    /// [`Cuda::end_capture`]. Used by the GPU-resident rollout to capture a
+    /// repeated dispatch sequence (e.g. the physics decimation loop) once and
+    /// replay it with a single launch — eliminating per-launch host encode/submit
+    /// overhead. THREAD_LOCAL mode scopes capture to the current thread.
+    ///
+    /// The captured sequence must be replay-safe: no allocation/free, no host
+    /// syncs, and stable buffer addresses across replays.
+    pub fn begin_capture(&self) -> Result<(), CudaBackendError> {
+        use cudarc::driver::sys::CUstreamCaptureMode;
+        self.stream
+            .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?;
+        Ok(())
+    }
+
+    /// End stream capture and instantiate the recorded graph for replay. Errors
+    /// if nothing was captured (the stream wasn't in capture, or recorded no work).
+    pub fn end_capture(&self) -> Result<CapturedGraph, CudaBackendError> {
+        use cudarc::driver::sys::CUgraphInstantiate_flags;
+        // No instantiate flags (0). The flags enum has no zero variant; it is
+        // consumed as `flags as u32 as u64`, so a 0-valued enum means "no flags".
+        let no_flags: CUgraphInstantiate_flags = unsafe { std::mem::transmute(0u32) };
+        let graph = self
+            .stream
+            .end_capture(no_flags)?
+            .ok_or(CudaBackendError::CaptureFailed)?;
+        // Debug: dump the captured graph's node structure to a DOT file
+        // (KHAL_CUDA_GRAPH_DOT=/path/out.dot). Invaluable for diagnosing
+        // relaunch failures — e.g. a stray mem-alloc node makes cuGraphLaunch
+        // return CUDA_ERROR_INVALID_VALUE on every launch after the first.
+        if let Ok(path) = std::env::var("KHAL_CUDA_GRAPH_DOT") {
+            let cpath = std::ffi::CString::new(path).unwrap();
+            // 1 = CU_GRAPH_DEBUG_DOT_FLAGS_VERBOSE
+            let res = unsafe {
+                cudarc::driver::sys::cuGraphDebugDotPrint(graph.cu_graph(), cpath.as_ptr(), 1)
+            };
+            eprintln!("[khal-cuda] graph dot dump: {res:?}");
+        }
+        Ok(CapturedGraph { graph })
+    }
+}
+
+/// A captured, instantiated CUDA graph. Replay the whole recorded kernel
+/// sequence with a single [`CapturedGraph::launch`] (one `cuGraphLaunch`),
+/// instead of re-encoding/re-submitting each dispatch from the host.
+pub struct CapturedGraph {
+    graph: driver::CudaGraph,
+}
+
+impl CapturedGraph {
+    /// Replay the captured kernel sequence with a single graph launch.
+    pub fn launch(&self) -> Result<(), CudaBackendError> {
+        self.graph.launch()?;
+        Ok(())
+    }
+
+    /// Pre-upload the graph's resources so the first [`CapturedGraph::launch`]
+    /// doesn't pay instantiation/upload cost.
+    pub fn upload(&self) -> Result<(), CudaBackendError> {
+        self.graph.upload()?;
+        Ok(())
     }
 }
 
@@ -55,6 +180,8 @@ pub enum CudaBackendError {
     Driver(#[from] driver::DriverError),
     #[error("Invalid PTX module")]
     InvalidPtx,
+    #[error("CUDA stream capture produced no graph")]
+    CaptureFailed,
 }
 
 // ── Buffer ─────────────────────────────────────────────────────────────
@@ -121,6 +248,7 @@ pub struct CudaModule {
 #[derive(Clone)]
 pub struct CudaFunction {
     pub(crate) func: driver::CudaFunction,
+    pub(crate) name: String,
 }
 
 // ── Encoder / Pass ─────────────────────────────────────────────────────
@@ -129,6 +257,8 @@ pub struct CudaFunction {
 /// is essentially a thin wrapper that holds a reference to the stream.
 pub struct CudaEncoder {
     pub(crate) stream: Arc<CudaStream>,
+    /// See [`Cuda::persistent_blocks`]; forwarded to passes and dispatches.
+    pub(crate) persistent_blocks: u32,
 }
 
 /// CUDA compute pass. CUDA doesn't have explicit compute pass boundaries.
@@ -136,6 +266,8 @@ pub struct CudaPass {
     pub(crate) stream: Arc<CudaStream>,
     /// Optional timing: records an end event on drop and pushes to the shared pending list.
     timing: Option<CudaPassTiming>,
+    /// See [`Cuda::persistent_blocks`].
+    pub(crate) persistent_blocks: u32,
 }
 
 impl Drop for CudaPass {
@@ -174,6 +306,8 @@ pub struct CudaDispatch<'a> {
     pub(crate) args: Vec<(ShaderBinding, u64, u64)>,
     #[cfg(feature = "push_constants")]
     pub(crate) push_constants: Vec<u8>,
+    /// See [`Cuda::persistent_blocks`].
+    pub(crate) persistent_blocks: u32,
 }
 
 impl<'a> CudaDispatch<'a> {
@@ -318,8 +452,17 @@ impl Backend for Cuda {
         entry_point: &str,
         _push_constant_size: u32,
     ) -> Result<Self::Function, Self::Error> {
-        let func = module.inner.load_function(entry_point)?;
-        Ok(CudaFunction { func })
+        let func = match module.inner.load_function(entry_point) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[khal-cuda load_function FAIL] {} -> {:?}", entry_point, e);
+                return Err(e.into());
+            }
+        };
+        Ok(CudaFunction {
+            func,
+            name: entry_point.to_string(),
+        })
     }
 
     fn load_function_with_layouts(
@@ -339,6 +482,7 @@ impl Backend for Cuda {
     fn begin_encoding(&self) -> Self::Encoder {
         CudaEncoder {
             stream: self.stream.clone(),
+            persistent_blocks: self.persistent_blocks,
         }
     }
 
@@ -353,6 +497,7 @@ impl Backend for Cuda {
             args: Vec::new(),
             #[cfg(feature = "push_constants")]
             push_constants: Vec::new(),
+            persistent_blocks: self.persistent_blocks,
         }
     }
 
@@ -384,6 +529,18 @@ impl Backend for Cuda {
             });
         }
         let bytes: &[u8] = bytemuck::cast_slice(data);
+        if std::env::var_os("KHAL_CUDA_ALLOC_TRACE").is_some()
+            && matches!(
+                self.stream.capture_status(),
+                Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE)
+            )
+        {
+            eprintln!(
+                "[khal-cuda] BUFFER_FROM_DATA DURING CAPTURE: {} bytes\n{}",
+                bytes.len(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let slice = self.stream.clone_htod(bytes)?;
         let raw_ptr = extract_raw_ptr(&slice, &self.stream);
         Ok(CudaBuffer {
@@ -410,6 +567,21 @@ impl Backend for Cuda {
             });
         }
         let byte_len = len * std::mem::size_of::<T>();
+        // Debug: catch capture-illegal allocations (KHAL_CUDA_ALLOC_TRACE=1).
+        // An allocation recorded while the stream is capturing becomes a
+        // MEM_ALLOC graph node, and a graph with un-freed alloc nodes cannot
+        // be relaunched (cuGraphLaunch -> CUDA_ERROR_INVALID_VALUE).
+        if std::env::var_os("KHAL_CUDA_ALLOC_TRACE").is_some()
+            && matches!(
+                self.stream.capture_status(),
+                Ok(cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_ACTIVE)
+            )
+        {
+            eprintln!(
+                "[khal-cuda] ALLOC DURING CAPTURE: {byte_len} bytes\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let slice = self.stream.alloc_zeros::<u8>(byte_len)?;
         let raw_ptr = extract_raw_ptr(&slice, &self.stream);
         Ok(CudaBuffer {
@@ -486,6 +658,7 @@ impl Encoder<Cuda> for CudaEncoder {
         CudaPass {
             stream: self.stream.clone(),
             timing,
+            persistent_blocks: self.persistent_blocks,
         }
     }
 
@@ -524,6 +697,10 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
         grid: impl Into<DispatchGrid<'b, Cuda>>,
         block_dim: [u32; 3],
     ) -> Result<(), CudaBackendError> {
+        // Indirect-args slice handed to the kernel entry as a trailing
+        // `(ptr, len)` pair: `(0, 0)` for direct dispatches (the entry then
+        // uses the real grid), the device `[u32; 3]` for indirect ones.
+        let mut indirect_args: (u64, u64) = (0, 0);
         let grid_dim = match grid.into() {
             DispatchGrid::Grid(g) => g,
             DispatchGrid::ThreadCount(t) => [
@@ -532,22 +709,37 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
                 t[2].div_ceil(block_dim[2]),
             ],
             DispatchGrid::Indirect(buffer) => {
-                // CUDA doesn't support indirect dispatch natively.
-                // Read the 12-byte dispatch args from device memory.
-                self.stream.synchronize()?;
-                if let Some(ref inner) = buffer.inner {
+                if std::env::var("KHAL_TRACE_INDIRECT").is_ok() {
+                    eprintln!("[khal] indirect dispatch: {}", self.function.name);
+                }
+                let Some(ref inner) = buffer.inner else {
+                    return Ok(());
+                };
+                if std::env::var_os("KHAL_CUDA_INDIRECT_SYNC").is_some() {
+                    // Debug fallback: read the 12-byte dispatch args back to
+                    // the host and launch the exact grid. Drains the stream on
+                    // every indirect dispatch.
+                    self.stream.synchronize()?;
                     let bytes: Vec<u8> = self.stream.clone_dtoh(inner)?;
-                    if bytes.len() >= 12 {
-                        [
-                            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                            u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-                            u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-                        ]
-                    } else {
+                    if bytes.len() < 12 {
                         return Ok(());
                     }
+                    [
+                        u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                        u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+                        u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+                    ]
                 } else {
-                    return Ok(());
+                    // CUDA has no device-side indirect launch. Instead of
+                    // reading the workgroup count back (a full stream drain per
+                    // dispatch), launch a fixed number of resident blocks: the
+                    // generated entry reads the `[u32; 3]` on the device and
+                    // loops over the virtual workgroups
+                    // (`lin = block_id; lin < x*y*z; lin += grid_size`), so
+                    // every block runs a uniform trip count and workgroup
+                    // barriers stay valid.
+                    indirect_args = (buffer.device_ptr_raw(), 3);
+                    [self.persistent_blocks, 1, 1]
                 }
             }
         };
@@ -594,6 +786,11 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
             }
         }
 
+        // Trailing indirect-args `(ptr, len)` pair (see above); the generated
+        // CUDA entries always declare it.
+        param_values.push(indirect_args.0);
+        param_values.push(indirect_args.1);
+
         // Launch using cudarc's launch_builder API.
         let mut builder = self.stream.launch_builder(&self.function.func);
         for value in &param_values {
@@ -607,8 +804,41 @@ impl<'a> Dispatch<'a, Cuda> for CudaDispatch<'a> {
             shared_mem_bytes: 0,
         };
 
+        let trace = std::env::var_os("KHAL_CUDA_TRACE").is_some();
+        if trace {
+            eprintln!(
+                "[khal-cuda launch] {} nargs={} grid={:?} block={:?}",
+                self.function.name,
+                param_values.len(),
+                grid_dim,
+                block_dim
+            );
+        }
+        let prof_start = if std::env::var_os("KHAL_CUDA_PROFILE").is_some() {
+            self.stream.synchronize()?;
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         unsafe {
             builder.launch(cfg)?;
+        }
+        if let Some(t0) = prof_start {
+            self.stream.synchronize()?;
+            let ns = t0.elapsed().as_nanos();
+            let mut map = kernel_profile().lock().unwrap();
+            let e = map.entry(self.function.name.clone()).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += ns;
+        }
+        if trace {
+            match self.stream.synchronize() {
+                Ok(()) => eprintln!("[khal-cuda   ok  ] {}", self.function.name),
+                Err(e) => {
+                    eprintln!("[khal-cuda  FAIL ] {} -> {:?}", self.function.name, e);
+                    return Err(e.into());
+                }
+            }
         }
 
         Ok(())

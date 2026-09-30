@@ -190,6 +190,15 @@ components = ["llvm-tools-preview", "rust-src", "rustc-dev"]
 
     if !status.success() {
         eprintln!("Failed to build rustc_codegen_nvvm");
+        eprintln!();
+        eprintln!("rustc_codegen_nvvm has native build requirements beyond the CUDA toolkit:");
+        eprintln!("  - LLVM 7.1.0 (libNVVM only accepts LLVM 7 bitcode). Rust-CUDA ships no");
+        eprintln!("    prebuilt LLVM for Linux, so build it from source and set");
+        eprintln!("    LLVM_CONFIG=/path/to/llvm-7/bin/llvm-config (see the khal README).");
+        eprintln!("  - pkg-config + OpenSSL headers (openssl-sys), e.g. `pkg-config libssl-dev`.");
+        eprintln!(
+            "  - libclang with its resource headers for bindgen, e.g. `libclang-common-<N>-dev`."
+        );
         std::process::exit(1);
     }
 
@@ -278,6 +287,14 @@ fn build(args: BuildArgs) {
         "-Zcrate-attr=no_std",
         "-Zsaturating_float_casts=false",
         "-Cllvm-args=--override-libm",
+        // MIR JumpThreading knows nothing about convergence: when a kernel
+        // tests the same (uniform) condition twice with a workgroup barrier in
+        // between, it threads the second test and DUPLICATES the barrier onto
+        // the threaded path. Threads of one warp then reach different
+        // `bar.sync` instructions, which deadlocks on sm_70+ (nexus MPM P2G).
+        // LLVM's own passes respect `convergent`; MIR's does not, so turn it
+        // off (cuda-oxide's cargo-oxide does the same).
+        "-Zmir-enable-passes=-JumpThreading",
     ];
     let rustflags = nvvm_flags.join("\x1f"); // Use unit separator for CARGO_ENCODED_RUSTFLAGS
 

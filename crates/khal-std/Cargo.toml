@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [features]
+default = ["rust-cuda"]
 cpu = ["corosensei"]
 cpu-parallel = ["cpu", "rayon"]
 cuda = []
@@ -24,12 +25,44 @@ cuda = []
 # for deploying to the web.
 unsafe_remove_boundchecks = []
 
+# --- nvptx64 device backend selection ---
+# `rust-cuda` (default): compile device code with Rust-CUDA's rustc_codegen_nvvm,
+# pulling `cuda_std` for thread/grid intrinsics and `GpuFloat` math.
+# `cuda-oxide`: compile device code with the cuda-oxide backend instead.
+# Thread/grid/barrier primitives route through the `cuda_device` API, which
+# the cuda-oxide importer recognizes by name on ANY compilation target - so
+# shader crates build as ordinary host-target crates (unified interception)
+# with no nvptx64 cross-target step; `Float` is libm-backed. Build shader
+# crates with `default-features = false, features = ["cuda-oxide", ...]`.
+rust-cuda = ["dep:cuda_std"]
+# The `cuda-device` API-surface crate resolves from upstream NVlabs
+# cuda-oxide (git pin below); consuming workspaces may [patch] it to a local
+# checkout when hacking on both.
+# `glamx/scalar-math`: the unified path compiles shader crates for the HOST
+# target, so glam must not take its SSE/SIMD paths (those don't lower to PTX).
+cuda-oxide = ["dep:num-traits", "dep:cuda-device", "glamx/scalar-math"]
+
 [dependencies]
 glamx = { version = "0.3", default-features = false, features = ["nostd-libm", "bytemuck", "u32", "i32", "f64"] }
 rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
 spirv-std-macros = "0.10.0-alpha.1"
 khal-derive = { version = "0.3.0", path = "../khal-derive" }
+# `Float` for the cuda-oxide backend (libm software math, no_std).
+num-traits = { version = "0.2", default-features = false, features = ["libm"], optional = true }
+# cuda-oxide device API (sregs, barriers, warp shuffles, atomics, SharedArray).
+# Plain (not target-gated) dependency: with the cuda-oxide backend the shader
+# crate is compiled on the HOST target (unified interception) or for nvptx64
+# (device-only builds); the importer recognizes the API by name either way.
+#
+# Pinned by git rev, not by path. This was previously
+#   path = "/home/xavier/cuda-oxide-src/crates/cuda-device"
+# an absolute path into one developer's home directory, so `--features
+# cuda-oxide` could not resolve on any other machine -- which is precisely the
+# portability the feature comment above promises. cuda-device is not published
+# on crates.io, so a git rev is the portable way to express it. Override with a
+# local checkout via [patch] in the consuming workspace when hacking on both.
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "62472763", optional = true }
 
 [lints]
 workspace = true
@@ -38,5 +71,7 @@ workspace = true
 spirv-std = "0.10.0-alpha.1"
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
-# Fixes the UVec3::element_product bug
-#cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up" }
+# Fixes the UVec3::element_product bug. Optional: only the `rust-cuda` backend
+# (rustc_codegen_nvvm) uses it; the `cuda-oxide` backend routes through
+# cuda-device instead (cuda_std does not build under `-Zbuild-std`).
+cuda_std = { git = "https://github.com/sebcrozet/Rust-CUDA.git", branch = "glam-up", optional = true }

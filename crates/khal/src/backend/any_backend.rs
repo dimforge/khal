@@ -2,9 +2,10 @@
 use crate::backend::WebGpu;
 #[cfg(feature = "cuda")]
 use crate::backend::cuda::{
-    Cuda, CudaBackendError, CudaBuffer, CudaBufferSlice, CudaDispatch as CudaDispatchInner,
-    CudaEncoder as CudaEncoderInner, CudaFunction as CudaFunctionInner,
-    CudaModule as CudaModuleInner, CudaPass as CudaPassInner, CudaTimestamps,
+    CapturedGraph, Cuda, CudaBackendError, CudaBuffer, CudaBufferSlice,
+    CudaDispatch as CudaDispatchInner, CudaEncoder as CudaEncoderInner,
+    CudaFunction as CudaFunctionInner, CudaModule as CudaModuleInner, CudaPass as CudaPassInner,
+    CudaTimestamps,
 };
 #[cfg(feature = "metal")]
 use crate::backend::metal::{
@@ -57,10 +58,160 @@ impl GpuBackend {
         }
     }
 
-    /// Returns `true` if this is the CUDA backend.
-    #[cfg(feature = "cuda")]
+    /// Whether [`Self::begin_capture`] / [`Self::end_capture`] are available
+    /// (CUDA graphs). WebGPU, Metal and CPU have no equivalent.
+    pub fn supports_graphs(&self) -> bool {
+        self.is_cuda()
+    }
+
+    /// Starts recording every dispatch, buffer copy and event submitted to
+    /// this backend into a graph instead of executing it, until
+    /// [`Self::end_capture`]. The recorded work is NOT executed by the capture
+    /// itself: launch the returned [`GpuGraph`] to run it.
+    ///
+    /// The captured region must be replay-safe: no buffer allocation or
+    /// release, no host readback or synchronization, no upload from pageable
+    /// host memory, and every buffer address used must stay valid for as long
+    /// as the graph is replayed. Host-side control flow (dispatch counts, loop
+    /// trip counts) is frozen at capture time.
+    pub fn begin_capture(&self) -> Result<(), GpuBackendError> {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(cuda) => Ok(cuda.begin_capture()?),
+            #[allow(unreachable_patterns)]
+            _ => Err(GpuBackendError::Unsupported("graph capture")),
+        }
+    }
+
+    /// Ends the recording started by [`Self::begin_capture`] and returns the
+    /// instantiated graph. Errors if the capture was invalidated (an operation
+    /// that cannot be captured was issued) or recorded nothing.
+    pub fn end_capture(&self) -> Result<GpuGraph, GpuBackendError> {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Cuda(cuda) => Ok(GpuGraph::Cuda(cuda.end_capture()?)),
+            #[allow(unreachable_patterns)]
+            _ => Err(GpuBackendError::Unsupported("graph capture")),
+        }
+    }
+
+    /// Returns `true` if this is the CUDA backend. Always available (returns
+    /// `false` when the `cuda` feature is disabled) so callers need not gate.
     pub fn is_cuda(&self) -> bool {
-        matches!(self, Self::Cuda(..))
+        #[cfg(feature = "cuda")]
+        {
+            matches!(self, Self::Cuda(..))
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            false
+        }
+    }
+
+    /// Auto-selects a backend: native CUDA on a Blackwell (sm_120+) device when
+    /// the `cuda` feature is compiled, else WebGPU. Override with
+    /// `KHAL_BACKEND=cuda|webgpu`.
+    pub async fn auto(features: wgpu::Features, limits: wgpu::Limits) -> anyhow::Result<Self> {
+        // Explicit native-Metal request (macOS): bypasses wgpu entirely —
+        // same SPIR-V, same naga MSL translation, but no wgpu state
+        // tracking / implicit-barrier layer. Never auto-selected: the
+        // WebGPU path stays the default on Metal targets.
+        if matches!(
+            std::env::var("KHAL_BACKEND").ok().as_deref(),
+            Some("metal" | "Metal" | "msl")
+        ) {
+            #[cfg(feature = "metal")]
+            {
+                eprintln!("[khal] backend = native Metal");
+                return Ok(Self::Metal(Metal::new()?));
+            }
+            #[cfg(not(feature = "metal"))]
+            anyhow::bail!(
+                "KHAL_BACKEND=metal requested but khal was built without the \
+                 'metal' feature"
+            );
+        }
+        // Resolve any explicit override: Some(true)=force CUDA, Some(false)=force
+        // WebGPU, None=auto-detect.
+        let want_cuda = match std::env::var("KHAL_BACKEND").ok().as_deref() {
+            Some("cuda") | Some("CUDA") => Some(true),
+            Some("webgpu") | Some("WebGpu") | Some("wgpu") => Some(false),
+            Some(other) => {
+                eprintln!("[khal] unknown KHAL_BACKEND={other:?}; auto-detecting");
+                None
+            }
+            None => {
+                if std::env::var("BIPED_CUDA").as_deref() == Ok("1") {
+                    eprintln!(
+                        "[khal] BIPED_CUDA=1 is deprecated; use KHAL_BACKEND=cuda (treating as such)"
+                    );
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        };
+
+        if want_cuda == Some(false) {
+            eprintln!("[khal] backend = WebGPU");
+            return Ok(Self::WebGpu(WebGpu::new(features, limits).await?));
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            match Cuda::new(0) {
+                Ok(cuda) => {
+                    let cc = cuda.compute_capability().ok();
+                    let is_blackwell = matches!(cc, Some((maj, _)) if maj >= 12);
+                    if want_cuda == Some(true) || is_blackwell {
+                        match cc {
+                            Some((maj, min)) => {
+                                eprintln!("[khal] backend = native CUDA (sm_{maj}{min})")
+                            }
+                            None => eprintln!("[khal] backend = native CUDA"),
+                        }
+                        return Ok(Self::Cuda(cuda));
+                    }
+                    if let Some((maj, min)) = cc {
+                        eprintln!("[khal] CUDA device sm_{maj}{min} < sm_120; using WebGPU");
+                    }
+                }
+                Err(e) => {
+                    // Explicitly requested but unavailable -> surface the error.
+                    if want_cuda == Some(true) {
+                        return Err(e.into());
+                    }
+                    // Auto-detect: fall back, but never silently — a CUDA init
+                    // failure on a machine with an NVIDIA GPU is usually real
+                    // breakage (driver mismatch, exhausted contexts), and a
+                    // quiet WebGPU run hides it behind a slower working one.
+                    eprintln!("[khal] CUDA unavailable ({e}); using WebGPU");
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            if want_cuda == Some(true) {
+                // An explicit KHAL_BACKEND=cuda must not silently run on a
+                // different backend: results/performance would differ from
+                // what the user asked to measure.
+                anyhow::bail!(
+                    "KHAL_BACKEND=cuda but this binary was built without the `cuda` feature (rebuild with `--features cuda_backend` / `khal/cuda`)"
+                );
+            }
+            // Auto-detect on a machine that visibly has an NVIDIA GPU: still
+            // use WebGPU (only backend compiled in), but say what a cuda-less
+            // binary is leaving on the table — a stale or misbuilt binary
+            // otherwise degrades silently.
+            if std::path::Path::new("/dev/nvidiactl").exists() {
+                eprintln!(
+                    "[khal] NVIDIA GPU present but this binary was built without the `cuda` feature; using WebGPU"
+                );
+            }
+        }
+
+        eprintln!("[khal] backend = WebGPU");
+        Ok(Self::WebGpu(WebGpu::new(features, limits).await?))
     }
 
     /// Returns `true` if this is the Metal backend.
@@ -555,6 +706,7 @@ impl GpuPass {
                 args: Vec::new(),
                 #[cfg(feature = "push_constants")]
                 push_constants: Vec::new(),
+                persistent_blocks: pass.persistent_blocks,
             }),
             #[cfg(feature = "metal")]
             (Self::Metal(pass), InnerGpuFunction::Metal(f)) => {
@@ -674,6 +826,28 @@ pub enum GpuBackendError {
     ContextNotFound,
     #[error("Noop backend error")]
     Noop,
+    #[error("operation not supported by this backend: {0}")]
+    Unsupported(&'static str),
+}
+
+/// A captured sequence of GPU work that can be replayed with a single launch
+/// (see [`GpuBackend::begin_capture`]). Only the CUDA backend can produce one.
+pub enum GpuGraph {
+    #[cfg(feature = "cuda")]
+    Cuda(CapturedGraph),
+}
+
+impl GpuGraph {
+    /// Replays the captured work on `backend`'s queue. Ordered with respect to
+    /// everything else submitted to that queue.
+    pub fn launch(&self, backend: &GpuBackend) -> Result<(), GpuBackendError> {
+        match (self, backend) {
+            #[cfg(feature = "cuda")]
+            (Self::Cuda(graph), GpuBackend::Cuda(_)) => Ok(graph.launch()?),
+            #[allow(unreachable_patterns)]
+            _ => Err(GpuBackendError::Unsupported("graph launch")),
+        }
+    }
 }
 
 /// Result of a single timed compute pass.
@@ -879,6 +1053,11 @@ enum ReadbackState {
     /// handler once the copy has landed in the shared staging buffer.
     #[cfg(feature = "metal")]
     Metal(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// A CUDA event recorded right after the async device→host copy of the
+    /// staging buffer into the readback's pinned host mirror; complete once
+    /// the data is on the host.
+    #[cfg(feature = "cuda")]
+    Cuda(cudarc::driver::CudaEvent),
 }
 
 /// Non-blocking GPU→CPU readback of a small buffer region.
@@ -895,6 +1074,12 @@ pub struct GpuReadback<T: DeviceValue + AnyBitPattern> {
     staging: GpuBuffer<T>,
     len: usize,
     state: ReadbackState,
+    /// CUDA: page-locked host mirror of `staging`. Device memory is never
+    /// host-visible, so each request enqueues an async device→host copy into
+    /// this buffer (pinned memory keeps that copy asynchronous) and
+    /// [`try_take`](Self::try_take) polls the event recorded after it.
+    #[cfg(feature = "cuda")]
+    cuda_host: Option<cudarc::driver::PinnedHostSlice<u8>>,
 }
 
 // SAFETY: mirrors `MetalTimestamps` — the only non-`Send`/`Sync` payload is a
@@ -908,10 +1093,24 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
     pub fn new(backend: &GpuBackend, len: usize) -> Result<Self, GpuBackendError> {
         let staging =
             backend.uninit_buffer::<T>(len, BufferUsages::MAP_READ | BufferUsages::COPY_DST)?;
+        #[cfg(feature = "cuda")]
+        let cuda_host = match (&staging, backend) {
+            (GpuBuffer::Cuda(_), GpuBackend::Cuda(cuda)) if len > 0 => {
+                let nbytes = len * std::mem::size_of::<T>();
+                // SAFETY: the pinned memory is only ever read after a
+                // device→host copy of `nbytes` bytes has completed into it.
+                let host = unsafe { cuda.context().alloc_pinned::<u8>(nbytes) }
+                    .map_err(|e| GpuBackendError::Cuda(e.into()))?;
+                Some(host)
+            }
+            _ => None,
+        };
         Ok(Self {
             staging,
             len,
             state: ReadbackState::Idle,
+            #[cfg(feature = "cuda")]
+            cuda_host,
         })
     }
 
@@ -981,8 +1180,33 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
     }
 
     /// Sets up backend-specific completion tracking after the copy is submitted.
-    fn begin_completion(&self, backend: &GpuBackend) -> ReadbackState {
+    fn begin_completion(&mut self, backend: &GpuBackend) -> ReadbackState {
         match (&self.staging, backend) {
+            #[cfg(feature = "cuda")]
+            (GpuBuffer::Cuda(buffer), GpuBackend::Cuda(cuda)) => {
+                // Enqueue the device→host copy into the pinned mirror right
+                // behind the staging copy, then record an event to poll. Both
+                // are asynchronous (pinned destination), so nothing here waits
+                // on the GPU. If anything fails, fall back to a synchronous
+                // read of the staging buffer at take time.
+                let nbytes = self.len * std::mem::size_of::<T>();
+                match (buffer.inner(), self.cuda_host.as_mut()) {
+                    (Some(inner), Some(host)) if nbytes > 0 => {
+                        let stream = cuda.stream();
+                        let copied = stream.memcpy_dtoh(&inner.slice(..nbytes), host);
+                        let event = copied.and_then(|()| {
+                            stream.record_event(Some(
+                                cudarc::driver::sys::CUevent_flags::CU_EVENT_DISABLE_TIMING,
+                            ))
+                        });
+                        match event {
+                            Ok(done) => ReadbackState::Cuda(done),
+                            Err(_) => ReadbackState::Ready,
+                        }
+                    }
+                    _ => ReadbackState::Ready,
+                }
+            }
             #[cfg(feature = "webgpu")]
             (GpuBuffer::WebGpu(buffer), _) => {
                 let (sender, receiver) = async_channel::bounded(1);
@@ -1037,6 +1261,36 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
                     false
                 }
             }
+            #[cfg(feature = "cuda")]
+            ReadbackState::Cuda(done) => {
+                if done.is_complete() {
+                    self.read_cuda_host_into(out);
+                    true
+                } else {
+                    self.state = ReadbackState::Cuda(done);
+                    false
+                }
+            }
+        }
+    }
+
+    /// CUDA: copies the pinned host mirror (filled by the request's async
+    /// device→host copy, whose event has completed) into `out`.
+    #[cfg(feature = "cuda")]
+    fn read_cuda_host_into(&self, out: &mut [T]) {
+        let n = out.len().min(self.len);
+        if n == 0 {
+            return;
+        }
+        let Some(host) = self.cuda_host.as_ref() else {
+            return self.read_staging_into(out);
+        };
+        // `as_slice` waits on the pinned slice's own transfer event, which is
+        // already complete here, so this does not block.
+        if let Ok(bytes) = host.as_slice() {
+            let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out[..n]);
+            let len = dst.len().min(bytes.len());
+            dst[..len].copy_from_slice(&bytes[..len]);
         }
     }
 
@@ -1059,6 +1313,19 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
                         out.as_mut_ptr(),
                         n,
                     );
+                }
+            }
+            #[cfg(feature = "cuda")]
+            GpuBuffer::Cuda(buffer) => {
+                // Synchronous fallback (no pinned mirror / event): copy straight
+                // from the device staging buffer. Blocks until the stream has
+                // run the staging copy.
+                if let Some(inner) = buffer.inner() {
+                    let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out[..n]);
+                    let nbytes = dst.len().min(inner.len());
+                    let _ = inner
+                        .stream()
+                        .memcpy_dtoh(&inner.slice(..nbytes), &mut dst[..nbytes]);
                 }
             }
             #[cfg(feature = "webgpu")]
@@ -1085,6 +1352,14 @@ impl<T: DeviceValue + AnyBitPattern + NoUninit> GpuReadback<T> {
 }
 
 impl Backend for GpuBackend {
+    #[cfg(feature = "cuda")]
+    fn as_cuda(&self) -> Option<&super::cuda::Cuda> {
+        match self {
+            Self::Cuda(c) => Some(c),
+            _ => None,
+        }
+    }
+
     const NAME: &'static str = "any";
     const TARGET: super::CompileTarget = super::CompileTarget::Wgsl;
 
@@ -1633,7 +1908,15 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBuffer<T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBuffer::Cuda(buffer), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, buffer.device_ptr_raw(), buffer.byte_len());
+                // cuda-oxide `&[T]` slice ABI wants an ELEMENT count, but byte_len is bytes;
+                // push element count so kernel `slice.len()` is correct (off-by-size_of
+                // otherwise -> OOB reads, e.g. gpu_init_sort_dispatch / lbvh). Arrays,
+                // scalars and uniforms ignore this value, so they are unaffected.
+                dispatch.set_arg(
+                    binding,
+                    buffer.device_ptr_raw(),
+                    buffer.byte_len() / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1665,7 +1948,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSlice<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSlice::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                dispatch.set_arg(
+                    binding,
+                    slice.offset_ptr(),
+                    slice.byte_len / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]
@@ -1702,7 +1989,11 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBufferSliceMut<'_, T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBufferSliceMut::Cuda(slice), GpuDispatch::Cuda(dispatch)) => {
-                dispatch.set_arg(binding, slice.offset_ptr(), slice.byte_len);
+                dispatch.set_arg(
+                    binding,
+                    slice.offset_ptr(),
+                    slice.byte_len / std::mem::size_of::<T>() as u64,
+                );
                 Ok(())
             }
             #[cfg(feature = "metal")]

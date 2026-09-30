@@ -8,8 +8,9 @@ use bytemuck::{AnyBitPattern, NoUninit};
 use regex::Regex;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ops::RangeBounds;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::wgt::CommandEncoderDescriptor;
 use wgpu::{
@@ -77,15 +78,36 @@ pub struct WebGpuFunction {
 }
 
 /// A WebGPU compute pass that carries its own device reference.
+///
+/// On wasm the pass may be a MERGED pass shared by successive `begin_pass`
+/// calls (see `WebGpuEncoder::open_pass`, wasm only); dropping the handle then returns
+/// the underlying pass to the encoder's cache instead of ending it.
 pub struct WebGpuPass {
-    pub(crate) pass: ComputePass<'static>,
+    pub(crate) pass: Option<ComputePass<'static>>,
     pub(crate) device: Device,
+    /// wasm pass-merging: the encoder cache slot this pass returns to on drop
+    /// (`None` = plain pass, ends on drop as before).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) home: Option<std::rc::Rc<std::cell::RefCell<Option<ComputePass<'static>>>>>,
 }
 
 impl WebGpuPass {
     /// Begins a compute dispatch within this pass, binding the given function.
     pub fn begin_dispatch<'a>(&'a mut self, function: &'a WebGpuFunction) -> WebGpuDispatch<'a> {
-        WebGpuDispatch::new(&self.device, &mut self.pass, function)
+        WebGpuDispatch::new(
+            &self.device,
+            self.pass.as_mut().expect("pass ended"),
+            function,
+        )
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WebGpuPass {
+    fn drop(&mut self) {
+        if let Some(home) = self.home.take() {
+            *home.borrow_mut() = self.pass.take();
+        }
     }
 }
 
@@ -93,6 +115,51 @@ impl WebGpuPass {
 pub struct WebGpuEncoder {
     pub(crate) encoder: CommandEncoder,
     pub(crate) device: Device,
+    /// wasm pass-merging: the open compute pass shared by successive
+    /// `begin_pass` calls. The browser's WebGPU spec guarantees storage-write
+    /// visibility between dispatches within one pass, and a Metal pass switch
+    /// costs ~60 µs — per-kernel passes put a ~15 ms/step floor under the
+    /// browser physics demo (~206 passes/step); merging removes it. Closed
+    /// (ended) by buffer copies and at submit.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) open_pass: std::rc::Rc<std::cell::RefCell<Option<ComputePass<'static>>>>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebGpuEncoder {
+    /// End the cached merged pass (if any) — required before encoder-level
+    /// commands (copies) and before `finish`.
+    fn close_open_pass(&mut self) {
+        drop(self.open_pass.borrow_mut().take());
+    }
+}
+
+/// wasm perf counters: every operation that crosses the wasm→browser GPU
+/// boundary, for the zealot demo's per-second HUD. Reading them answers
+/// "where do the crossings go" without a profiler build.
+#[cfg(target_arch = "wasm32")]
+pub mod perf_counters {
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    pub static SUBMITS: AtomicU32 = AtomicU32::new(0);
+    /// Compute passes actually OPENED (merged-cache hits don't count).
+    pub static PASSES: AtomicU32 = AtomicU32::new(0);
+    /// Encoder-level buffer copies — each one closes the merged pass.
+    pub static COPIES: AtomicU32 = AtomicU32::new(0);
+    /// queue.write_buffer uploads.
+    pub static WRITES: AtomicU32 = AtomicU32::new(0);
+    /// Buffer map requests (readbacks).
+    pub static MAPS: AtomicU32 = AtomicU32::new(0);
+
+    /// Take-and-zero all counters: (submits, passes, copies, writes, maps).
+    pub fn take() -> (u32, u32, u32, u32, u32) {
+        (
+            SUBMITS.swap(0, Relaxed),
+            PASSES.swap(0, Relaxed),
+            COPIES.swap(0, Relaxed),
+            WRITES.swap(0, Relaxed),
+            MAPS.swap(0, Relaxed),
+        )
+    }
 }
 
 /// Helper struct to initialize a device and its queue.
@@ -110,6 +177,14 @@ pub struct WebGpu {
     spirv_passthrough_enabled: bool,
     /// Whether `TIMESTAMP_QUERY` is supported on this device.
     timestamp_supported: bool,
+    /// Per-size pool of `MAP_READ | COPY_DST` staging buffers, reused across
+    /// `slow_read_buffer` calls so we don't pay a fresh `create_buffer` /
+    /// `MTLBuffer.makeBuffer` (and its inverse on drop) every call. Keyed by
+    /// buffer size in bytes. `Vec` per size so concurrent callers with the
+    /// same payload size each get an exclusive buffer. `Arc` so cloned
+    /// `WebGpu` handles (which already share the same underlying device /
+    /// queue via wgpu's internal Arcs) also share the pool.
+    read_staging_pool: Arc<Mutex<HashMap<u64, Vec<Buffer>>>>,
 }
 
 impl WebGpu {
@@ -191,6 +266,7 @@ impl WebGpu {
             hacks: vec![],
             spirv_passthrough_enabled,
             timestamp_supported,
+            read_staging_pool: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -213,7 +289,41 @@ impl WebGpu {
             hacks: vec![],
             spirv_passthrough_enabled,
             timestamp_supported,
+            read_staging_pool: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Pop a `MAP_READ | COPY_DST` staging buffer of exactly `bytes_len` bytes
+    /// from the readback pool, allocating one if the pool is empty for that
+    /// size. Pairs with [`Self::release_read_staging`]. Used by [`Backend::slow_read_buffer`]
+    /// to avoid allocating a fresh GPU buffer (and freeing it) on every call.
+    fn acquire_read_staging(&self, bytes_len: u64) -> Buffer {
+        if let Some(buf) = self
+            .read_staging_pool
+            .lock()
+            .expect("read_staging_pool poisoned")
+            .get_mut(&bytes_len)
+            .and_then(|v| v.pop())
+        {
+            return buf;
+        }
+        self.device.create_buffer(&BufferDescriptor {
+            label: Some("khal-read-staging"),
+            size: bytes_len,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Return a staging buffer to the pool so the next `slow_read_buffer` of
+    /// the same size can reuse it. Caller must have already `unmap`ed it.
+    fn release_read_staging(&self, bytes_len: u64, buf: Buffer) {
+        self.read_staging_pool
+            .lock()
+            .expect("read_staging_pool poisoned")
+            .entry(bytes_len)
+            .or_default()
+            .push(buf);
     }
 
     /// Adds a regex-based text replacement to apply to WGSL source before compilation.
@@ -282,6 +392,10 @@ impl WebGpu {
         }
 
         let spirv = wgpu::util::make_spirv_raw(spirv_bytes);
+        // wgpu doesn't reflect passthrough modules, so it only knows the entry points we
+        // declare here. `create_compute_pipeline` then rejects any entry point missing
+        // from that list, so declare every entry point the module actually contains.
+        let entry_points = spirv_entry_points(&spirv);
 
         // SAFETY: the caller has marked this shader as requiring passthrough loading,
         // meaning it uses SPIR-V features not supported by naga. The SPIR-V bytecode
@@ -290,6 +404,7 @@ impl WebGpu {
             self.device
                 .create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
                     spirv: Some(spirv),
+                    entry_points: Cow::Owned(entry_points),
                     ..Default::default()
                 })
         };
@@ -303,6 +418,67 @@ impl WebGpu {
         #[cfg(not(feature = "push_constants"))]
         Ok(shader_module)
     }
+}
+
+/// Lists the entry points declared by a SPIR-V module, with the workgroup size of each.
+///
+/// This reads the `OpEntryPoint` and `OpExecutionMode LocalSize` instructions directly
+/// from the SPIR-V words, without going through naga (passthrough modules are exactly the
+/// ones naga can't handle). Entry points without a `LocalSize` execution mode get a
+/// workgroup size of `(0, 0, 0)`; wgpu only uses that field on Metal anyway.
+fn spirv_entry_points(words: &[u32]) -> Vec<wgpu::PassthroughShaderEntryPoint<'static>> {
+    const HEADER_LEN: usize = 5;
+    const OP_ENTRY_POINT: u32 = 15;
+    const OP_EXECUTION_MODE: u32 = 16;
+    const EXECUTION_MODE_LOCAL_SIZE: u32 = 17;
+
+    // (function id, name)
+    let mut entry_points: Vec<(u32, String)> = Vec::new();
+    // (function id, workgroup size)
+    let mut local_sizes: Vec<(u32, (u32, u32, u32))> = Vec::new();
+
+    let mut i = HEADER_LEN;
+    while i < words.len() {
+        let word_count = (words[i] >> 16) as usize;
+        let opcode = words[i] & 0xffff;
+        if word_count == 0 {
+            break; // Malformed module; stop rather than loop forever.
+        }
+        let end = (i + word_count).min(words.len());
+
+        match opcode {
+            // OpEntryPoint: execution model, function id, literal name, interface ids...
+            OP_ENTRY_POINT if word_count >= 4 => {
+                let function_id = words[i + 2];
+                let bytes: Vec<u8> = words[i + 3..end]
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .collect();
+                let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                let name = String::from_utf8_lossy(&bytes[..len]).into_owned();
+                entry_points.push((function_id, name));
+            }
+            // OpExecutionMode: function id, mode, literals... (LocalSize has x, y, z)
+            OP_EXECUTION_MODE if word_count >= 6 && words[i + 2] == EXECUTION_MODE_LOCAL_SIZE => {
+                local_sizes.push((words[i + 1], (words[i + 3], words[i + 4], words[i + 5])));
+            }
+            _ => {}
+        }
+
+        i = end;
+    }
+
+    entry_points
+        .into_iter()
+        .map(|(function_id, name)| wgpu::PassthroughShaderEntryPoint {
+            name: Cow::Owned(name),
+            workgroup_size: local_sizes
+                .iter()
+                .find(|(id, _)| *id == function_id)
+                .map(|(_, size)| *size)
+                .unwrap_or((0, 0, 0)),
+        })
+        .collect()
 }
 
 /// Errors specific to the WebGPU backend.
@@ -509,6 +685,8 @@ impl Backend for WebGpu {
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor::default()),
             device: self.device.clone(),
+            #[cfg(target_arch = "wasm32")]
+            open_pass: Default::default(),
         }
     }
 
@@ -521,6 +699,12 @@ impl Backend for WebGpu {
     }
 
     fn submit(&self, encoder: Self::Encoder) -> Result<(), Self::Error> {
+        #[cfg(target_arch = "wasm32")]
+        let mut encoder = encoder;
+        #[cfg(target_arch = "wasm32")]
+        encoder.close_open_pass();
+        #[cfg(target_arch = "wasm32")]
+        perf_counters::SUBMITS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let _ = self.queue.submit(Some(encoder.encoder.finish()));
         Ok(())
     }
@@ -576,6 +760,8 @@ impl Backend for WebGpu {
         offset: u64,
         data: &[T],
     ) -> Result<(), Self::Error> {
+        #[cfg(target_arch = "wasm32")]
+        perf_counters::WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let elt_sz = std::mem::size_of::<T>() as u64;
         self.queue
             .write_buffer(buffer, offset * elt_sz, bytemuck::cast_slice(data));
@@ -628,18 +814,25 @@ impl Backend for WebGpu {
         buffer: &Self::Buffer<T>,
         out: &mut [T],
     ) -> Result<(), Self::Error> {
-        // Create staging buffer.
-        let bytes_len = buffer.size() as usize;
-        let staging =
-            self.uninit_buffer::<u8>(bytes_len, BufferUsages::MAP_READ | BufferUsages::COPY_DST)?;
+        // Acquire (or allocate) a pooled staging buffer of the exact size.
+        // For a steady-state RL loop reading the same buffer every step this
+        // pool warms up after the first call and we stop paying the per-step
+        // `create_buffer` / drop round-trip (especially expensive on Metal
+        // where it's a fresh MTLBuffer allocation each time).
+        let bytes_len = buffer.size();
+        let staging = self.acquire_read_staging(bytes_len);
         let mut encoder = self.begin_encoding();
         encoder
             .encoder
-            .copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes_len as u64);
+            .copy_buffer_to_buffer(buffer, 0, &staging, 0, bytes_len);
         self.submit(encoder)?;
 
-        // Read the buffer.
-        self.read_buffer(&staging, out).await
+        // `read_buffer` does the map_async + memcpy + unmap. After this call
+        // the staging buffer is back in `MAP_READ | COPY_DST` ready state and
+        // safe to return to the pool.
+        let result = self.read_buffer(&staging, out).await;
+        self.release_read_staging(bytes_len, staging);
+        result
     }
 }
 
@@ -650,6 +843,7 @@ impl Encoder<WebGpu> for WebGpuEncoder {
             timestamp_writes: None,
         };
 
+        let mut wants_timestamps = false;
         if let Some(timestamps) = timestamps
             && let Some((begin_idx, end_idx)) = timestamps.alloc_timestamp_pair(label.to_string())
         {
@@ -658,11 +852,35 @@ impl Encoder<WebGpu> for WebGpuEncoder {
                 beginning_of_pass_write_index: Some(begin_idx),
                 end_of_pass_write_index: Some(end_idx),
             });
+            wants_timestamps = true;
         }
 
+        // wasm pass-merging: reuse the cached open pass (per-pass timestamps
+        // force a dedicated pass, so those bypass the cache).
+        #[cfg(target_arch = "wasm32")]
+        if !wants_timestamps {
+            let cached = self.open_pass.borrow_mut().take();
+            let pass = cached.unwrap_or_else(|| {
+                perf_counters::PASSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                self.encoder.begin_compute_pass(&desc).forget_lifetime()
+            });
+            return WebGpuPass {
+                pass: Some(pass),
+                device: self.device.clone(),
+                home: Some(self.open_pass.clone()),
+            };
+        }
+        #[cfg(target_arch = "wasm32")]
+        if wants_timestamps {
+            self.close_open_pass();
+        }
+        let _ = wants_timestamps;
+
         WebGpuPass {
-            pass: self.encoder.begin_compute_pass(&desc).forget_lifetime(),
+            pass: Some(self.encoder.begin_compute_pass(&desc).forget_lifetime()),
             device: self.device.clone(),
+            #[cfg(target_arch = "wasm32")]
+            home: None,
         }
     }
 
@@ -674,6 +892,11 @@ impl Encoder<WebGpu> for WebGpuEncoder {
         target_offset: usize,
         copy_len: usize,
     ) -> Result<(), WebGpuBackendError> {
+        // Copies are encoder-level commands: the merged pass must end first.
+        #[cfg(target_arch = "wasm32")]
+        self.close_open_pass();
+        #[cfg(target_arch = "wasm32")]
+        perf_counters::COPIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         wgpu::CommandEncoder::copy_buffer_to_buffer(
             &mut self.encoder,
             source,
@@ -768,10 +991,21 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
             }
         }
 
+        // WebGPU caps each workgroup-grid dimension at 65535; wgpu's own
+        // validation error doesn't say WHICH dispatch — name it here.
+        let check_grid = |grid_dim: [u32; 3]| {
+            if grid_dim.iter().any(|&d| d > 65535) {
+                panic!(
+                    "dispatch grid {grid_dim:?} exceeds WebGPU's 65535 per-dimension \
+                     workgroup cap (a flattened dispatch that needs a 2D split?)"
+                );
+            }
+        };
         match grid.into() {
             DispatchGrid::Grid(grid_dim) => {
                 // NOTE: we don't need to queue if the workgroup is empty.
                 if grid_dim[0] * grid_dim[1] * grid_dim[2] > 0 {
+                    check_grid(grid_dim);
                     self.pass
                         .dispatch_workgroups(grid_dim[0], grid_dim[1], grid_dim[2]);
                 }
@@ -783,6 +1017,7 @@ impl<'a> Dispatch<'a, WebGpu> for WebGpuDispatch<'a> {
                     threads[2].div_ceil(_block_dim[2]),
                 ];
                 if grid_dim[0] * grid_dim[1] * grid_dim[2] > 0 {
+                    check_grid(grid_dim);
                     self.pass
                         .dispatch_workgroups(grid_dim[0], grid_dim[1], grid_dim[2]);
                 }
@@ -859,6 +1094,10 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
     #[cfg(not(target_arch = "wasm32"))]
     {
         let (sender, receiver) = async_channel::bounded(1);
+        #[cfg(target_arch = "wasm32")]
+        {
+            perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             sender.send_blocking(v).unwrap()
         });
@@ -872,6 +1111,10 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
     #[cfg(target_arch = "wasm32")]
     {
         let (sender, receiver) = async_channel::bounded(1);
+        #[cfg(target_arch = "wasm32")]
+        {
+            perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             let _ = sender.force_send(v).unwrap();
         });

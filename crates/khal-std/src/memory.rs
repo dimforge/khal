@@ -1,10 +1,10 @@
-#[cfg(target_arch = "nvptx64")]
+#[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
 pub use memory_nvptx::*;
-#[cfg(not(target_arch = "nvptx64"))]
+#[cfg(not(any(target_arch = "nvptx64", feature = "cuda-oxide")))]
 pub use spirv_std::memory::*;
 
-// On nvptx64, provide the memory scope constants.
-#[cfg(target_arch = "nvptx64")]
+// On the CUDA backends, provide the memory scope constants.
+#[cfg(any(target_arch = "nvptx64", feature = "cuda-oxide"))]
 pub mod memory_nvptx {
     /// Memory scope levels matching SPIR-V semantics for use on the CUDA backend.
     #[derive(Copy, Clone)]

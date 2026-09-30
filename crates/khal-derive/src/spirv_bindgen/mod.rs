@@ -660,6 +660,16 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
         &cuda_entry_ident,
     );
 
+    // cuda-oxide PTX backend variant (typed params; selected by the
+    // `cuda-oxide` feature on the shader crate).
+    let cuda_oxide_entry_block = cuda::generate_cuda_oxide_entry_block(
+        &func,
+        &original_params,
+        &bindings,
+        workgroup_size,
+        &cuda_entry_ident,
+    );
+
     let cuda_entry_name_str = &cuda_entry_name;
 
     // Extract doc attributes from the original function to propagate to the generated struct.
@@ -820,6 +830,7 @@ pub(crate) fn spirv_bindgen(attr: TokenStream, item: TokenStream) -> TokenStream
         #args_struct_def
         #wrapper_def
         #cuda_entry_block
+        #cuda_oxide_entry_block
     };
 
     output.into()

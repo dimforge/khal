@@ -3,5 +3,15 @@
     "source_path": "../khal-example/shaders-spirv/add_assign.spv",
     "entry_point": "add_assign",
     "wgsl_entry_point": "add_assign"
+  },
+  {
+    "source_path": "../khal-example/shaders-spirv/batch_probe.spv",
+    "entry_point": "batch_probe",
+    "wgsl_entry_point": "batch_probe"
+  },
+  {
+    "source_path": "../khal-example/shaders-spirv/grid_probe.spv",
+    "entry_point": "grid_probe",
+    "wgsl_entry_point": "grid_probe"
   }
 ]
