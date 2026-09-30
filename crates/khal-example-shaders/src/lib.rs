@@ -17,7 +17,7 @@ pub fn add_assign(
     }
 }
 
-/// 2D-grid probe: writes a tag encoding (batch=y, x, src[y]) per slot.
+/// 2D-grid probe: writes a tag encoding (batch=y, x, `src[y]`) per slot.
 #[spirv_bindgen]
 #[spirv(compute(threads(64)))]
 pub fn grid_probe(
@@ -31,7 +31,10 @@ pub fn grid_probe(
     if x >= cap || y as usize >= src.len() {
         return;
     }
-    out.write((y * cap + x) as usize, (y << 20) | (src.read(y as usize) << 10) | x);
+    out.write(
+        (y * cap + x) as usize,
+        (y << 20) | (src.read(y as usize) << 10) | x,
+    );
 }
 
 /// Batched StepRng probe mimicking the nexus narrow-phase pattern:

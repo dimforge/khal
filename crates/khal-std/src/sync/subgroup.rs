@@ -15,11 +15,7 @@ pub fn subgroup_f_add(val: f32) -> f32 {
     {
         warp_reduce_add(val)
     }
-    #[cfg(not(any(
-        target_arch = "spirv",
-        target_arch = "nvptx64",
-        feature = "cuda-oxide"
-    )))]
+    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64", feature = "cuda-oxide")))]
     {
         val
     }
@@ -42,11 +38,7 @@ pub fn subgroup_f_max(val: f32) -> f32 {
     {
         warp_reduce_max(val)
     }
-    #[cfg(not(any(
-        target_arch = "spirv",
-        target_arch = "nvptx64",
-        feature = "cuda-oxide"
-    )))]
+    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64", feature = "cuda-oxide")))]
     {
         val
     }

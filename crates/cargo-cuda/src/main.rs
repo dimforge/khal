@@ -196,7 +196,9 @@ components = ["llvm-tools-preview", "rust-src", "rustc-dev"]
         eprintln!("    prebuilt LLVM for Linux, so build it from source and set");
         eprintln!("    LLVM_CONFIG=/path/to/llvm-7/bin/llvm-config (see the khal README).");
         eprintln!("  - pkg-config + OpenSSL headers (openssl-sys), e.g. `pkg-config libssl-dev`.");
-        eprintln!("  - libclang with its resource headers for bindgen, e.g. `libclang-common-<N>-dev`.");
+        eprintln!(
+            "  - libclang with its resource headers for bindgen, e.g. `libclang-common-<N>-dev`."
+        );
         std::process::exit(1);
     }
 

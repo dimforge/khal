@@ -316,7 +316,10 @@ pub(super) fn generate_cuda_oxide_entry_block(
             // reference in a prelude so the ABI stays aligned.
             let is_uniform = matches!(
                 p.kind,
-                OriginalParamKind::Binding { is_uniform: true, .. }
+                OriginalParamKind::Binding {
+                    is_uniform: true,
+                    ..
+                }
             );
             if is_uniform {
                 return quote! { #name: #ty };
@@ -406,10 +409,9 @@ pub(super) fn generate_cuda_oxide_entry_block(
                 // `SharedArray<T, 1>` viewed as `&mut T`. A real reference (not a
                 // wrapper) so the body can index it directly AND pass it to
                 // helpers that take `&mut [T; N]` / `&mut T`.
-                let static_name =
-                    syn::Ident::new(&format!("__smem_{}", name), name.span());
-                match &p.ty {
-                    syn::Type::Reference(r) => match &*r.elem {
+                let static_name = syn::Ident::new(&format!("__smem_{}", name), name.span());
+                if let syn::Type::Reference(r) = &p.ty {
+                    match &*r.elem {
                         // `&mut [f32; N]` shared tile -> a real `&mut [f32; N]` into
                         // the `SharedArray`'s storage, so the body can index it,
                         // call MaybeIndexUnchecked on it AND pass it verbatim to
@@ -446,8 +448,7 @@ pub(super) fn generate_cuda_oxide_entry_block(
                                 let #name: &mut #elem_ty = &mut #sref_name[0];
                             });
                         }
-                    },
-                    _ => {}
+                    }
                 }
             }
             _ => {}

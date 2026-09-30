@@ -45,70 +45,115 @@ mod cuda_oxide_float {
                 // while the `__nv_*` symbols are stable across toolchains.
                 #[inline(always)]
                 fn exp(self) -> $ty {
-                    unsafe extern "C" { fn $nvexp(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvexp(x: $ty) -> $ty;
+                    }
                     unsafe { $nvexp(self) }
                 }
                 #[inline(always)]
                 fn ln(self) -> $ty {
-                    unsafe extern "C" { fn $nvlog(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvlog(x: $ty) -> $ty;
+                    }
                     unsafe { $nvlog(self) }
                 }
                 // These intrinsics still exist on every nightly cuda-oxide
                 // supports; newer toolchains made them safe, hence the allow.
                 #[inline(always)]
                 #[allow(unused_unsafe)]
-                fn sqrt(self) -> $ty { unsafe { core::intrinsics::$sqrt(self) } }
+                fn sqrt(self) -> $ty {
+                    unsafe { core::intrinsics::$sqrt(self) }
+                }
                 #[inline(always)]
                 #[allow(unused_unsafe)]
-                fn powf(self, n: $ty) -> $ty { unsafe { core::intrinsics::$pow(self, n) } }
+                fn powf(self, n: $ty) -> $ty {
+                    unsafe { core::intrinsics::$pow(self, n) }
+                }
                 #[inline(always)]
                 #[allow(unused_unsafe)]
-                fn floor(self) -> $ty { unsafe { core::intrinsics::$floor(self) } }
+                fn floor(self) -> $ty {
+                    unsafe { core::intrinsics::$floor(self) }
+                }
                 #[inline(always)]
                 #[allow(unused_unsafe)]
-                fn ceil(self) -> $ty { unsafe { core::intrinsics::$ceil(self) } }
+                fn ceil(self) -> $ty {
+                    unsafe { core::intrinsics::$ceil(self) }
+                }
                 // abs/max/min via plain ops (no stable intrinsic names here).
                 #[inline(always)]
-                fn abs(self) -> $ty { if self < 0.0 { -self } else { self } }
+                fn abs(self) -> $ty {
+                    if self < 0.0 { -self } else { self }
+                }
                 #[inline(always)]
-                fn max(self, other: $ty) -> $ty { if self >= other { self } else { other } }
+                fn max(self, other: $ty) -> $ty {
+                    if self >= other { self } else { other }
+                }
                 #[inline(always)]
-                fn min(self, other: $ty) -> $ty { if self <= other { self } else { other } }
+                fn min(self, other: $ty) -> $ty {
+                    if self <= other { self } else { other }
+                }
                 #[inline(always)]
                 fn atan(self) -> $ty {
-                    unsafe extern "C" { fn $nvatan(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvatan(x: $ty) -> $ty;
+                    }
                     unsafe { $nvatan(self) }
                 }
                 #[inline(always)]
                 fn sin(self) -> $ty {
-                    unsafe extern "C" { fn $nvsin(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvsin(x: $ty) -> $ty;
+                    }
                     unsafe { $nvsin(self) }
                 }
                 #[inline(always)]
                 fn cos(self) -> $ty {
-                    unsafe extern "C" { fn $nvcos(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvcos(x: $ty) -> $ty;
+                    }
                     unsafe { $nvcos(self) }
                 }
                 #[inline(always)]
                 fn asin(self) -> $ty {
-                    unsafe extern "C" { fn $nvasin(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvasin(x: $ty) -> $ty;
+                    }
                     unsafe { $nvasin(self) }
                 }
                 #[inline(always)]
                 fn acos(self) -> $ty {
-                    unsafe extern "C" { fn $nvacos(x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvacos(x: $ty) -> $ty;
+                    }
                     unsafe { $nvacos(self) }
                 }
                 #[inline(always)]
                 fn atan2(self, x: $ty) -> $ty {
-                    unsafe extern "C" { fn $nvatan2(y: $ty, x: $ty) -> $ty; }
+                    unsafe extern "C" {
+                        fn $nvatan2(y: $ty, x: $ty) -> $ty;
+                    }
                     unsafe { $nvatan2(self, x) }
                 }
             }
         };
     }
-    float_impl!(f32, sqrtf32, powf32, floorf32, ceilf32, __nv_expf, __nv_logf,
-        __nv_atanf, __nv_sinf, __nv_cosf, __nv_asinf, __nv_acosf, __nv_atan2f);
-    float_impl!(f64, sqrtf64, powf64, floorf64, ceilf64, __nv_exp, __nv_log,
-        __nv_atan, __nv_sin, __nv_cos, __nv_asin, __nv_acos, __nv_atan2);
+    float_impl!(
+        f32,
+        sqrtf32,
+        powf32,
+        floorf32,
+        ceilf32,
+        __nv_expf,
+        __nv_logf,
+        __nv_atanf,
+        __nv_sinf,
+        __nv_cosf,
+        __nv_asinf,
+        __nv_acosf,
+        __nv_atan2f
+    );
+    float_impl!(
+        f64, sqrtf64, powf64, floorf64, ceilf64, __nv_exp, __nv_log, __nv_atan, __nv_sin, __nv_cos,
+        __nv_asin, __nv_acos, __nv_atan2
+    );
 }

@@ -3,9 +3,9 @@ use crate::backend::WebGpu;
 #[cfg(feature = "cuda")]
 use crate::backend::cuda::{
     CapturedGraph, Cuda, CudaBackendError, CudaBuffer, CudaBufferSlice,
-    CudaDispatch as CudaDispatchInner,
-    CudaEncoder as CudaEncoderInner, CudaFunction as CudaFunctionInner,
-    CudaModule as CudaModuleInner, CudaPass as CudaPassInner, CudaTimestamps,
+    CudaDispatch as CudaDispatchInner, CudaEncoder as CudaEncoderInner,
+    CudaFunction as CudaFunctionInner, CudaModule as CudaModuleInner, CudaPass as CudaPassInner,
+    CudaTimestamps,
 };
 #[cfg(feature = "metal")]
 use crate::backend::metal::{

@@ -59,13 +59,21 @@ pub mod cuda_oxide_glue {
     pub struct SmemBuf<T: 'static, const N: usize>(pub &'static mut SharedArray<T, N>);
     impl<T: Copy, const N: usize> MaybeIndexUnchecked<T> for SmemBuf<T, N> {
         #[inline(always)]
-        fn read(&self, i: usize) -> T { self.0[i] }
+        fn read(&self, i: usize) -> T {
+            self.0[i]
+        }
         #[inline(always)]
-        fn write(&mut self, i: usize, v: T) { self.0[i] = v; }
+        fn write(&mut self, i: usize, v: T) {
+            self.0[i] = v;
+        }
         #[inline(always)]
-        fn at_mut(&mut self, i: usize) -> &mut T { &mut self.0[i] }
+        fn at_mut(&mut self, i: usize) -> &mut T {
+            &mut self.0[i]
+        }
         #[inline(always)]
-        fn at(&self, i: usize) -> &T { &self.0[i] }
+        fn at(&self, i: usize) -> &T {
+            &self.0[i]
+        }
     }
     impl<T: 'static, const N: usize> core::ops::Index<usize> for SmemBuf<T, N> {
         type Output = T;

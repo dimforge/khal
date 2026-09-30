@@ -80,7 +80,7 @@ pub struct WebGpuFunction {
 /// A WebGPU compute pass that carries its own device reference.
 ///
 /// On wasm the pass may be a MERGED pass shared by successive `begin_pass`
-/// calls (see [`WebGpuEncoder::open_pass`]); dropping the handle then returns
+/// calls (see `WebGpuEncoder::open_pass`, wasm only); dropping the handle then returns
 /// the underlying pass to the encoder's cache instead of ending it.
 pub struct WebGpuPass {
     pub(crate) pass: Option<ComputePass<'static>>,
@@ -94,7 +94,11 @@ pub struct WebGpuPass {
 impl WebGpuPass {
     /// Begins a compute dispatch within this pass, binding the given function.
     pub fn begin_dispatch<'a>(&'a mut self, function: &'a WebGpuFunction) -> WebGpuDispatch<'a> {
-        WebGpuDispatch::new(&self.device, self.pass.as_mut().expect("pass ended"), function)
+        WebGpuDispatch::new(
+            &self.device,
+            self.pass.as_mut().expect("pass ended"),
+            function,
+        )
     }
 }
 
@@ -291,7 +295,7 @@ impl WebGpu {
 
     /// Pop a `MAP_READ | COPY_DST` staging buffer of exactly `bytes_len` bytes
     /// from the readback pool, allocating one if the pool is empty for that
-    /// size. Pairs with [`release_read_staging`]. Used by [`slow_read_buffer`]
+    /// size. Pairs with [`Self::release_read_staging`]. Used by [`Backend::slow_read_buffer`]
     /// to avoid allocating a fresh GPU buffer (and freeing it) on every call.
     fn acquire_read_staging(&self, bytes_len: u64) -> Buffer {
         if let Some(buf) = self
@@ -1091,7 +1095,9 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
     {
         let (sender, receiver) = async_channel::bounded(1);
         #[cfg(target_arch = "wasm32")]
-        { perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
+        {
+            perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             sender.send_blocking(v).unwrap()
         });
@@ -1106,7 +1112,9 @@ async fn read_bytes(device: &Device, buffer: &Buffer) -> Result<BufferView, WebG
     {
         let (sender, receiver) = async_channel::bounded(1);
         #[cfg(target_arch = "wasm32")]
-        { perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
+        {
+            perf_counters::MAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             let _ = sender.force_send(v).unwrap();
         });

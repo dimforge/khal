@@ -54,11 +54,7 @@ pub fn workgroup_memory_barrier_with_group_sync() {
         }
     }
 
-    #[cfg(not(any(
-        target_arch = "spirv",
-        target_arch = "nvptx64",
-        feature = "cuda-oxide"
-    )))]
+    #[cfg(not(any(target_arch = "spirv", target_arch = "nvptx64", feature = "cuda-oxide")))]
     #[cfg(feature = "cpu")]
     {
         crate::arch::cpu::barrier_wait();
