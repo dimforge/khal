@@ -125,8 +125,7 @@ the synchronous host readback for debugging.
 `GpuGraph` that `launch()` replays with a single driver call (a CUDA graph today; other backends return
 `GpuBackendError::Unsupported`). The captured region must be replay-safe: no buffer allocation, no host
 readback or synchronization, no upload from pageable host memory, and host-side control flow is frozen
-at capture time. nexus uses this to replay a whole physics frame (`NEXUS_COMPUTE_GRAPHS=1`, or the
-"Compute graphs" checkbox / `--compute-graphs` flag of its testbed).
+at capture time.
 
 ### PTX vs. cubin
 
