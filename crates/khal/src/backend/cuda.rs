@@ -107,10 +107,9 @@ impl Cuda {
 
     /// Begin CUDA stream capture on the default stream: subsequent kernel
     /// launches are *recorded* into a graph instead of executed, until
-    /// [`Cuda::end_capture`]. Used by the GPU-resident rollout to capture a
-    /// repeated dispatch sequence (e.g. the physics decimation loop) once and
-    /// replay it with a single launch — eliminating per-launch host encode/submit
-    /// overhead. THREAD_LOCAL mode scopes capture to the current thread.
+    /// [`Cuda::end_capture`]. This lets a repeated dispatch sequence be replayed with a
+    /// single launch, eliminating per-launch host encode/submit overhead. Capture is scoped
+    /// to the current thread.
     ///
     /// The captured sequence must be replay-safe: no allocation/free, no host
     /// syncs, and stable buffer addresses across replays.

@@ -24,7 +24,7 @@ use wgpu::{
 /// Runtime checks used for `create_shader_module_trusted`.
 ///
 /// NOTE: we keep force_loop_boinding on to avoid what appears to be miscompilation of the
-///       multibody kernels on some platforms (Windows native + Nvidia gpu).
+///       some kernels on some platforms (Windows native + Nvidia gpu).
 fn shader_runtime_checks() -> ShaderRuntimeChecks {
     ShaderRuntimeChecks {
         force_loop_bounding: true,
@@ -115,12 +115,9 @@ impl Drop for WebGpuPass {
 pub struct WebGpuEncoder {
     pub(crate) encoder: CommandEncoder,
     pub(crate) device: Device,
-    /// wasm pass-merging: the open compute pass shared by successive
-    /// `begin_pass` calls. The browser's WebGPU spec guarantees storage-write
-    /// visibility between dispatches within one pass, and a Metal pass switch
-    /// costs ~60 µs — per-kernel passes put a ~15 ms/step floor under the
-    /// browser physics demo (~206 passes/step); merging removes it. Closed
-    /// (ended) by buffer copies and at submit.
+    /// wasm pass-merging: the open compute pass shared by successive `begin_pass` calls, since
+    /// pass switches are costly in browsers and WebGPU guarantees storage-write visibility
+    /// between dispatches of one pass. Ended by buffer copies and at submit.
     #[cfg(target_arch = "wasm32")]
     pub(crate) open_pass: std::rc::Rc<std::cell::RefCell<Option<ComputePass<'static>>>>,
 }
@@ -134,9 +131,8 @@ impl WebGpuEncoder {
     }
 }
 
-/// wasm perf counters: every operation that crosses the wasm→browser GPU
-/// boundary, for the zealot demo's per-second HUD. Reading them answers
-/// "where do the crossings go" without a profiler build.
+/// wasm perf counters: every operation that crosses the wasm→browser GPU boundary, for
+/// profiling without a profiler build.
 #[cfg(target_arch = "wasm32")]
 pub mod perf_counters {
     use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -814,11 +810,8 @@ impl Backend for WebGpu {
         buffer: &Self::Buffer<T>,
         out: &mut [T],
     ) -> Result<(), Self::Error> {
-        // Acquire (or allocate) a pooled staging buffer of the exact size.
-        // For a steady-state RL loop reading the same buffer every step this
-        // pool warms up after the first call and we stop paying the per-step
-        // `create_buffer` / drop round-trip (especially expensive on Metal
-        // where it's a fresh MTLBuffer allocation each time).
+        // Reuse a pooled staging buffer of the exact size to avoid a `create_buffer`/drop
+        // round-trip on every read (especially expensive on Metal).
         let bytes_len = buffer.size();
         let staging = self.acquire_read_staging(bytes_len);
         let mut encoder = self.begin_encoding();

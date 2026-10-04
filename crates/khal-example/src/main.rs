@@ -57,7 +57,7 @@ async fn main() {
     }
     println!("grid_probe (threads form): {} mismatches", bad);
 
-    // batch_probe: raw workgroup Grid dispatch [1, nb, 1] like nexus fixed grids.
+    // batch_probe: raw workgroup Grid dispatch [1, nb, 1].
     let lens: Vec<u32> = (0..nb).map(|b| 10 + b).collect();
     let lens_buf = backend.init_buffer(&lens, BufferUsages::STORAGE).unwrap();
     let src2: Vec<u32> = (0..cap * nb).collect();

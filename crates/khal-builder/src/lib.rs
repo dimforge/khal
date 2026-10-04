@@ -94,9 +94,8 @@ impl KhalBuilder {
 
         self.setup_change_detection();
 
-        // Consumers embed this directory at compile time (e.g. vortx's
-        // `include_dir!("$OUT_DIR/shaders-spirv")`), so it must exist even when the
-        // SPIR-V build is skipped — otherwise the host crate fails to compile.
+        // Consumers embed this directory at compile time (e.g. with `include_dir!`), so it
+        // must exist even when the SPIR-V build is skipped.
         std::fs::create_dir_all(output_dir)
             .unwrap_or_else(|e| panic!("failed to create shader output dir {output_dir:?}: {e}"));
 
@@ -179,7 +178,7 @@ impl KhalBuilder {
     /// Compiles the shader crate to PTX for the CUDA backend.
     ///
     /// `CUDA_OXIDE_SHADERS_PTX_<SHADER_CRATE_NAME>` (upper-snake, e.g.
-    /// `CUDA_OXIDE_SHADERS_PTX_VORTX_SHADERS`) points at a prebuilt PTX/cubin;
+    /// `CUDA_OXIDE_SHADERS_PTX_MY_SHADERS`) points at a prebuilt PTX/cubin;
     /// when set it is embedded directly as `shaders.ptx` and no PTX compiler
     /// (`cargo cuda` / `cargo oxide`) is required.
     ///

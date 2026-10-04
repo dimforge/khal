@@ -2,13 +2,31 @@
 
 _Disclaimer: this changelog is updated using generative AI, but is still verified manually._
 
-## Unreleased
+## v0.4.0
 
 ### Added
-- `atomic_sub_u32` in `khal-std`: atomic wrapping subtraction on a storage-buffer `u32`, returning the old value (`OpAtomicISub` on SPIR-V, `fetch_sub` elsewhere).
+- **cuda-oxide support** as an alternative to rust-cuda for building CUDA kernels. Enable the `cuda-oxide` feature on `khal-builder` and on `khal-std` (with `default-features = false`; the new default `rust-cuda` feature keeps the previous behavior). `#[spirv_bindgen]` emits a matching kernel entry. (#13)
+- **Compute graphs**: `GpuBackend::begin_capture`/`end_capture` record submitted work into a `GpuGraph` that is replayed with `GpuGraph::launch`. CUDA only for now (`GpuBackend::supports_graphs`); other backends return the new `GpuBackendError::Unsupported`.
+- `GpuBackend::auto`: picks CUDA on sm_120+ devices when compiled in, WebGPU otherwise. Overridable with `KHAL_BACKEND=cuda|webgpu|metal`.
+- `GpuReadback` is now non-blocking on CUDA (async copy into pinned host memory polled with an event).
+- `Cuda::compute_capability`.
+- `khal-builder`: CUDA PTX is assembled into a cubin with `ptxas` when available (avoids driver/toolkit PTX version mismatches; opt out with `KHAL_CUDA_KEEP_PTX=1`; target arch from `KHAL_CUDA_ARCH` or auto-detected). `KHAL_SKIP_SPIRV=1` skips the SPIR-V build, and `CUDA_OXIDE_SHADERS_PTX_<CRATE>` embeds a prebuilt PTX/cubin.
+- `atomic_sub_u32` in `khal-std`.
+- Debugging env vars for the CUDA backend: `KHAL_CUDA_TRACE`, `KHAL_CUDA_PROFILE` (with `cuda::dump_kernel_profile`), `KHAL_CUDA_ALLOC_TRACE`, `KHAL_CUDA_GRAPH_DOT`.
+
+### Changed
+- **Breaking (CUDA):** indirect dispatches no longer read the workgroup count back to the host. Kernels are launched with a fixed number of resident blocks (`KHAL_CUDA_PERSISTENT_BLOCKS`, default 16×SM count) that loop over the virtual workgroups. This changes the generated kernel ABI (slice bindings now receive an element count instead of a byte length, plus a trailing indirect-args parameter), so CUDA shaders must be rebuilt. `KHAL_CUDA_INDIRECT_SYNC=1` restores the old readback path.
+- The CUDA backend now runs on its own stream instead of the legacy default stream (required for graph capture).
+- `load_function` errors on CUDA name the missing entry point. (#10)
+- Metal now matches WebGPU semantics: buffers are zero-initialized, out-of-bounds reads return zero and writes are skipped, workgroup memory is zero-initialized, loops are bounded, fast math is disabled, and MSL targets Metal 3.0.
+- WebGPU: `slow_read_buffer` reuses pooled staging buffers. On wasm, consecutive compute passes are merged into one to cut per-pass overhead.
+- WebGPU: dispatches exceeding the 65535 per-dimension workgroup limit panic with an explicit message.
+- `GpuBackend::is_cuda` is available without the `cuda` feature.
+- `cargo-cuda` disables MIR jump-threading, which could duplicate workgroup barriers and deadlock kernels.
 
 ### Fixed
-- WebGPU SPIR-V passthrough loading (`WebGpu::load_module_spirv_passthrough`) now declares the module's entry points (parsed from `OpEntryPoint`/`OpExecutionMode LocalSize`) in the wgpu passthrough descriptor. wgpu 30 validates compute pipelines against that list, so with it left empty every passthrough kernel failed to load on Vulkan with `Unable to find entry point`.
+- Metal: `write_buffer` while GPU work is in flight no longer races with running kernels; it is now ordered after previously submitted work.
+- WebGPU SPIR-V passthrough modules now declare their entry points to wgpu, which otherwise failed to load them on Vulkan with `Unable to find entry point`.
 
 ## v0.3.0
 

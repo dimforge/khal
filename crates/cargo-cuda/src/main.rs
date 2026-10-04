@@ -287,13 +287,9 @@ fn build(args: BuildArgs) {
         "-Zcrate-attr=no_std",
         "-Zsaturating_float_casts=false",
         "-Cllvm-args=--override-libm",
-        // MIR JumpThreading knows nothing about convergence: when a kernel
-        // tests the same (uniform) condition twice with a workgroup barrier in
-        // between, it threads the second test and DUPLICATES the barrier onto
-        // the threaded path. Threads of one warp then reach different
-        // `bar.sync` instructions, which deadlocks on sm_70+ (nexus MPM P2G).
-        // LLVM's own passes respect `convergent`; MIR's does not, so turn it
-        // off (cuda-oxide's cargo-oxide does the same).
+        // MIR JumpThreading ignores convergence and can duplicate a workgroup barrier so that
+        // threads of one warp reach different `bar.sync`, deadlocking on sm_70+ (cargo-oxide
+        // disables it too).
         "-Zmir-enable-passes=-JumpThreading",
     ];
     let rustflags = nvvm_flags.join("\x1f"); // Use unit separator for CARGO_ENCODED_RUSTFLAGS
