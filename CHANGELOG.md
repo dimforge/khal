@@ -15,6 +15,7 @@ _Disclaimer: this changelog is updated using generative AI, but is still verifie
 - Debugging env vars for the CUDA backend: `KHAL_CUDA_TRACE`, `KHAL_CUDA_PROFILE` (with `cuda::dump_kernel_profile`), `KHAL_CUDA_ALLOC_TRACE`, `KHAL_CUDA_GRAPH_DOT`.
 
 ### Changed
+- Bumped `spirv-std` and `spirv-std-macros` to `0.10.0`; shaders must now be built with `cargo-gpu 0.10.0`.
 - **Breaking (CUDA):** indirect dispatches no longer read the workgroup count back to the host. Kernels are launched with a fixed number of resident blocks (`KHAL_CUDA_PERSISTENT_BLOCKS`, default 16×SM count) that loop over the virtual workgroups. This changes the generated kernel ABI (slice bindings now receive an element count instead of a byte length, plus a trailing indirect-args parameter), so CUDA shaders must be rebuilt. `KHAL_CUDA_INDIRECT_SYNC=1` restores the old readback path.
 - The CUDA backend now runs on its own stream instead of the legacy default stream (required for graph capture).
 - `load_function` errors on CUDA name the missing entry point. (#10)

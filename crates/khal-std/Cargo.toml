@@ -46,7 +46,7 @@ cuda-oxide = ["dep:num-traits", "dep:cuda-device", "glamx/scalar-math"]
 glamx = { version = "0.3", default-features = false, features = ["nostd-libm", "bytemuck", "u32", "i32", "f64"] }
 rayon = { version = "1", optional = true }
 corosensei = { version = "0.3", optional = true }
-spirv-std-macros = "0.10.0-alpha.1"
+spirv-std-macros = "0.10.0"
 khal-derive = { version = "0.4.0", path = "../khal-derive" }
 # `Float` for the cuda-oxide backend (libm software math, no_std).
 num-traits = { version = "0.2", default-features = false, features = ["libm"], optional = true }
@@ -62,7 +62,7 @@ cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "6247276
 workspace = true
 
 [target.'cfg(not(target_arch = "nvptx64"))'.dependencies]
-spirv-std = "0.10.0-alpha.1"
+spirv-std = "0.10.0"
 
 [target.'cfg(target_arch = "nvptx64")'.dependencies]
 # Fixes the UVec3::element_product bug. Optional: only the `rust-cuda` backend

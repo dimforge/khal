@@ -34,7 +34,7 @@ on any platform: **WebGPU**, **CUDA**, or **CPU** -- from a single codebase.
 Install `cargo-gpu` from crates.io:
 
 ```bash
-cargo install cargo-gpu --version 0.10.0-alpha.1
+cargo install cargo-gpu --version 0.10.0 --locked
 cargo gpu install
 ```
 
