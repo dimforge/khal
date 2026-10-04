@@ -42,15 +42,9 @@ pub struct Metal {
     /// Capabilities for GPU timestamp queries; `None` if the device or
     /// driver doesn't expose stage-boundary timestamp sampling.
     timing_caps: Option<Arc<MetalTimingCaps>>,
-    /// Set by `submit`, cleared by `synchronize`. While set, `write_buffer`
-    /// must not memcpy into shared memory directly — wgpu's
-    /// `queue.write_buffer` is ordered AFTER already-submitted work, and a
-    /// raw memcpy is not: host writes then race in-flight kernel reads of
-    /// the same buffer (observed: the zealot biped's staged per-env uploads
-    /// corrupting so every env ran the last env's robot). Instead, writes
-    /// while work may be in flight go through a staging buffer + a blit
-    /// command buffer committed to the queue — FIFO queue order gives
-    /// exactly wgpu's semantics with no CPU stall.
+    /// Set by `submit`, cleared by `synchronize`. While set, `write_buffer` goes through a
+    /// staging buffer and a queued blit instead of a raw memcpy, so the write is ordered after
+    /// in-flight kernels (matching wgpu's `queue.write_buffer`) without stalling the CPU.
     gpu_busy: Arc<AtomicBool>,
     /// Open blit command buffer collecting the current write burst's staged
     /// copies (see `gpu_busy`). Committed lazily by the next `submit` /
@@ -722,33 +716,23 @@ impl Backend for Metal {
         per_entry_point.insert(entry_point.to_string(), entry_point_resources);
 
         let options = naga::back::msl::Options {
-            // Metal 3: matches what wgpu targets on modern macOS. The 2.4
-            // target visibly miscompiled the fused multibody dynamics kernel
-            // (lane decode collapsed to the last slot) on M-series.
+            // Metal 3: matches what wgpu targets on modern macOS. The 2.4 target miscompiled
+            // some kernels on M-series GPUs.
             lang_version: (3, 0),
             per_entry_point_map: per_entry_point,
             inline_samplers: vec![],
             spirv_cross_compatibility: false,
             fake_missing_bindings: false,
-            // Match wgpu's WebGPU semantics EXACTLY: OOB reads return zero
-            // and OOB writes are skipped (`ReadZeroSkipWrite`), and workgroup
-            // memory starts zeroed. This is load-bearing, not defensive: the
-            // physics kernels were written against wgpu and rely on
-            // zero-read/skip-write semantics for by-design out-of-bounds
-            // accesses (inactive lane slots, StepRng trailer threads). naga's
-            // default (`Unchecked`) is UB there, and `Restrict` deterministically
-            // clamps reads to the END of each buffer — every batch then
-            // computes from the LAST batch's slice (observed: all envs ran
-            // batch N-1's robot on Metal while WebGPU was correct).
+            // Match WebGPU semantics: OOB reads return zero, OOB writes are skipped, and
+            // workgroup memory starts zeroed. Kernels written against wgpu may rely on this.
             bounds_check_policies: naga::proc::BoundsCheckPolicies {
                 index: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
                 buffer: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
                 ..naga::proc::BoundsCheckPolicies::default()
             },
             zero_initialize_workgroup_memory: true,
-            // wgpu enables loop bounding on Metal: Apple's compiler
-            // miscompiles potentially-unbounded loops (the trimesh BVH
-            // traversal visibly lost contacts without this).
+            // wgpu enables loop bounding on Metal: Apple's compiler can miscompile
+            // potentially-unbounded loops.
             force_loop_bounding: true,
             task_dispatch_limits: None,
             mesh_shader_primitive_indices_clamp: true,
@@ -797,10 +781,8 @@ impl Backend for Metal {
             .map(|ep| ep.workgroup_size)
             .ok_or_else(|| MetalBackendError::EntryPointNotFound(entry_point.into()))?;
 
-        // Compile MSL. Metal's compiler defaults to fast math, which drops
-        // NaN/Inf semantics and reassociates float ops — the physics kernels
-        // (and wgpu's Metal path, which this backend must agree with) need
-        // IEEE behavior, so disable it.
+        // Compile MSL. Fast math (Metal's default) is disabled to keep IEEE NaN/Inf semantics
+        // and agree with wgpu's Metal path.
         let compile_options = metal::CompileOptions::new();
         compile_options.set_fast_math_enabled(false);
         let library: Library = self

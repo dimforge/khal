@@ -37,8 +37,7 @@ pub fn grid_probe(
     );
 }
 
-/// Batched StepRng probe mimicking the nexus narrow-phase pattern:
-/// per-batch len + strided loop + batch-sliced reads.
+/// Batched StepRng probe: per-batch len + strided loop + batch-sliced reads.
 #[spirv_bindgen]
 #[spirv(compute(threads(64)))]
 pub fn batch_probe(

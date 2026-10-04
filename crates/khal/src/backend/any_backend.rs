@@ -140,16 +140,7 @@ impl GpuBackend {
                 eprintln!("[khal] unknown KHAL_BACKEND={other:?}; auto-detecting");
                 None
             }
-            None => {
-                if std::env::var("BIPED_CUDA").as_deref() == Ok("1") {
-                    eprintln!(
-                        "[khal] BIPED_CUDA=1 is deprecated; use KHAL_BACKEND=cuda (treating as such)"
-                    );
-                    Some(true)
-                } else {
-                    None
-                }
-            }
+            None => None,
         };
 
         if want_cuda == Some(false) {
@@ -196,7 +187,7 @@ impl GpuBackend {
                 // different backend: results/performance would differ from
                 // what the user asked to measure.
                 anyhow::bail!(
-                    "KHAL_BACKEND=cuda but this binary was built without the `cuda` feature (rebuild with `--features cuda_backend` / `khal/cuda`)"
+                    "KHAL_BACKEND=cuda but this binary was built without the `cuda` feature (rebuild with the `khal/cuda` feature)"
                 );
             }
             // Auto-detect on a machine that visibly has an NVIDIA GPU: still
@@ -1908,10 +1899,8 @@ impl<'b, T: DeviceValue> crate::ShaderArgs<'b> for GpuBuffer<T> {
             }
             #[cfg(feature = "cuda")]
             (GpuBuffer::Cuda(buffer), GpuDispatch::Cuda(dispatch)) => {
-                // cuda-oxide `&[T]` slice ABI wants an ELEMENT count, but byte_len is bytes;
-                // push element count so kernel `slice.len()` is correct (off-by-size_of
-                // otherwise -> OOB reads, e.g. gpu_init_sort_dispatch / lbvh). Arrays,
-                // scalars and uniforms ignore this value, so they are unaffected.
+                // Kernel entries take slices as `(ptr, element count)`, matching cuda-oxide's `&[T]`
+                // ABI. Arrays, scalars and uniforms ignore the length.
                 dispatch.set_arg(
                     binding,
                     buffer.device_ptr_raw(),

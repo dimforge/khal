@@ -27,4 +27,4 @@ khal-std = { path = "../khal-std" }
 workspace = true
 
 [target.'cfg(not(any(target_arch = "spirv", target_arch = "nvptx64")))'.dependencies]
-khal = { version = "0.3.0", path = "../khal", features = ["derive"] }
+khal = { version = "0.4.0", path = "../khal", features = ["derive"] }

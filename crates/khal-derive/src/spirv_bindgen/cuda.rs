@@ -415,7 +415,7 @@ pub(super) fn generate_cuda_oxide_entry_block(
                         // `&mut [f32; N]` shared tile -> a real `&mut [f32; N]` into
                         // the `SharedArray`'s storage, so the body can index it,
                         // call MaybeIndexUnchecked on it AND pass it verbatim to
-                        // helpers typed `&mut [T; N]` (e.g. vortx's tree reductions).
+                        // helpers typed `&mut [T; N]` (e.g. tree reductions).
                         // `SharedArray::as_mut_ptr` is intercepted by the cuda-oxide
                         // importer and yields a generic pointer to shared memory
                         // (cvta.shared), so accesses through the reference are
@@ -579,13 +579,9 @@ fn virtual_workgroup_loop(
             __khal_lin / (__khal_num_wg.x * __khal_num_wg.y),
         );
     };
-    // A real workgroup starts with all of its threads synchronized and its
-    // shared memory untouched by anyone else. Between two virtual workgroups
-    // of the same block, fast threads would otherwise start writing the next
-    // iteration's shared-memory staging while slow threads still read the
-    // previous one's (nexus MPM G2P halo nodes: particles in the top rows of
-    // a block went astray once blocks looped). The condition is uniform per
-    // block, so the barrier is well-formed and skipped on the last iteration.
+    // Prevents fast threads from overwriting shared memory for the next virtual workgroup while
+    // slow threads still read the previous one. The condition is uniform per block, so the
+    // barrier is well-formed (and skipped on the last iteration).
     let iteration_barrier = quote! {
         if __khal_lin < __khal_total {
             khal_std::sync::workgroup_memory_barrier_with_group_sync();
