@@ -272,6 +272,12 @@ fn build(args: BuildArgs) {
         "--release",
         "-Zbuild-std=core,alloc",
         "-Zbuild-std-features=panic_immediate_abort",
+        // spirv-std 0.10 uses `cfg_select!`, still unstable on RUST_CUDA_NIGHTLY. Enable it
+        // for that crate only: `core` already enables it, and enabling a feature twice is an
+        // error.
+        "-Zprofile-rustflags",
+        "--config",
+        r#"profile.release.package.spirv-std.rustflags=["-Zcrate-attr=feature(cfg_select)"]"#,
     ]);
 
     if let Some(ref features) = args.features {
@@ -291,6 +297,11 @@ fn build(args: BuildArgs) {
         // threads of one warp reach different `bar.sync`, deadlocking on sm_70+ (cargo-oxide
         // disables it too).
         "-Zmir-enable-passes=-JumpThreading",
+        // Workgroup memory is a `&mut` shared by every thread of the block, so it must not be
+        // `noalias`: once inlined, LLVM marks the barriers as not accessing it, then forwards
+        // stores and hoists loads across them. Threads then disagree on values exchanged
+        // through workgroup memory (nexus LBVH refit deadlocks).
+        "-Zmutable-noalias=no",
     ];
     let rustflags = nvvm_flags.join("\x1f"); // Use unit separator for CARGO_ENCODED_RUSTFLAGS
 
