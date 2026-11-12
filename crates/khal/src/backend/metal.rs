@@ -8,6 +8,8 @@
 //! later dispatch reads from a buffer written by an earlier one in the
 //! same compute pass.
 
+mod msl_literals;
+
 use crate::backend::{
     Backend, BufferUsages, CompileTarget, DescriptorType, DeviceValue, Dispatch, DispatchGrid,
     Encoder, GpuTimestamp, MaybeSendSync, ShaderBinding,
@@ -753,6 +755,7 @@ impl Backend for Metal {
         let translation_info = writer
             .write(&module.naga, &module.info, &options, &pipeline_options)
             .map_err(|e| MetalBackendError::MslWrite(format!("{e}")))?;
+        let msl = msl_literals::repair_float_literals(&msl);
 
         if std::env::var("KHAL_METAL_DUMP_MSL").is_ok() {
             eprintln!("──── MSL for `{}` ────\n{}\n────────────", entry_point, msl);
