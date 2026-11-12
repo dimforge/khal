@@ -2,7 +2,7 @@
 
 _Disclaimer: this changelog is updated using generative AI, but is still verified manually._
 
-## Unreleased
+## v0.4.1
 
 ### Fixed
 - Native Metal: repair Naga's malformed subnormal literals before shader compilation (dimforge/nexus#48), without changing the calling thread's floating-point mode.
